@@ -1,0 +1,25 @@
+[package]
+name = "kreoctl"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Userspace RGB controller and CLI for the Kreo Hive keyboard on Linux"
+repository = "https://github.com/myaumyauverse/kreoctl"
+readme = "README.md"
+
+[features]
+default = []
+gui = ["dep:eframe"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+directories = "6"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
+hidapi = "2.6"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
