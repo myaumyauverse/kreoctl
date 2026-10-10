@@ -88,16 +88,113 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_hex_and_presets() {
+    fn parses_hex_colors_properly() {
         assert_eq!(parse_color("#00ff88"), Some(Rgb::new(0, 255, 136)));
-        assert_eq!(parse_color("red"), Some(Rgb::new(255, 0, 0)));
-        assert_eq!(parse_color("not-a-color"), None);
+        assert_eq!(parse_color("00ff88"), Some(Rgb::new(0, 255, 136)));
+        assert_eq!(parse_color("#ffffff"), Some(Rgb::new(255, 255, 255)));
+        assert_eq!(parse_color("#000000"), Some(Rgb::new(0, 0, 0)));
+        assert_eq!(parse_color("#AABBCC"), Some(Rgb::new(170, 187, 204)));
+        assert_eq!(parse_color("#123456"), Some(Rgb::new(18, 52, 86)));
+        assert_eq!(parse_color("  #00ff88  "), Some(Rgb::new(0, 255, 136)));
     }
 
     #[test]
-    fn report_contains_rgb_at_verified_offsets() {
-        let report = color_report(Rgb::new(1, 2, 3));
-        assert_eq!(&report[14..17], &[1, 2, 3]);
-        assert_eq!(report[0], 4);
+    fn parses_all_builtin_presets() {
+        for (name, expected_color) in PRESETS {
+            assert_eq!(
+                parse_color(name),
+                Some(expected_color),
+                "Preset '{name}' failed to parse"
+            );
+        }
+        // Test case-insensitivity on presets
+        assert_eq!(parse_color("RED"), Some(Rgb::new(255, 0, 0)));
+        assert_eq!(parse_color("Cyan"), Some(Rgb::new(0, 255, 255)));
+        assert_eq!(parse_color("oFf"), Some(Rgb::new(0, 0, 0)));
+    }
+
+    #[test]
+    fn rejects_invalid_color_inputs() {
+        assert_eq!(parse_color(""), None);
+        assert_eq!(parse_color("   "), None);
+        assert_eq!(parse_color("not-a-color"), None);
+        assert_eq!(parse_color("bluish"), None);
+        assert_eq!(parse_color("#fff"), None); // 3-digit shorthand is not supported
+        assert_eq!(parse_color("#00ff88ff"), None); // 8-digit RGBA is not supported
+        assert_eq!(parse_color("#GGGGGG"), None); // Non-hex characters
+        assert_eq!(parse_color("#12345Z"), None);
+        assert_eq!(parse_color("#12345"), None); // 5 digits
+        assert_eq!(parse_color("#1234567"), None); // 7 digits
+    }
+
+    #[test]
+    fn formats_hex_correctly() {
+        assert_eq!(Rgb::new(0, 0, 0).hex(), "#000000");
+        assert_eq!(Rgb::new(255, 255, 255).hex(), "#ffffff");
+        assert_eq!(Rgb::new(1, 2, 3).hex(), "#010203");
+        assert_eq!(Rgb::new(0, 255, 136).hex(), "#00ff88");
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn egui_float_conversions_roundtrip() {
+        let original = Rgb::new(255, 128, 64);
+        let floats = original.egui();
+        let recovered = Rgb::from_egui(floats);
+        assert_eq!(original, recovered);
+
+        // Test clamping on out-of-bounds float inputs
+        assert_eq!(Rgb::from_egui([-1.0, 2.0, 0.5]), Rgb::new(0, 255, 128));
+    }
+
+    #[test]
+    fn report_matches_verified_hardware_layout() {
+        let report = color_report(Rgb::new(10, 20, 30));
+
+        // Exact report dimensions
+        assert_eq!(report.len(), 64);
+
+        // Report ID
+        assert_eq!(report[0], 0x04);
+
+        // Command header
+        assert_eq!(&report[1..5], &[0x3b, 0x02, 0x06, 0x22]);
+
+        // Padding before param header
+        assert_eq!(&report[5..9], &[0x00, 0x00, 0x00, 0x00]);
+
+        // Param header
+        assert_eq!(&report[9..12], &[0x06, 0x04, 0x02]);
+
+        // Padding before RGB
+        assert_eq!(&report[12..14], &[0x00, 0x00]);
+
+        // RGB payload
+        assert_eq!(&report[14..17], &[10, 20, 30]);
+
+        // Mode parameter
+        assert_eq!(report[17], 0x08);
+
+        // Padding before commit byte
+        assert_eq!(&report[18..28], &[0_u8; 10]);
+
+        // Commit / activation flag
+        assert_eq!(report[28], 0x01);
+
+        // Trailing padding must be all zeros
+        assert_eq!(&report[29..64], &[0_u8; 35]);
+    }
+
+    #[test]
+    fn report_handles_edge_cases() {
+        // Pure black / LEDs off
+        let off_report = color_report(Rgb::new(0, 0, 0));
+        assert_eq!(&off_report[14..17], &[0, 0, 0]);
+        assert_eq!(off_report[0], 0x04);
+        assert_eq!(off_report[28], 0x01);
+
+        // Pure white
+        let white_report = color_report(Rgb::new(255, 255, 255));
+        assert_eq!(&white_report[14..17], &[255, 255, 255]);
     }
 }

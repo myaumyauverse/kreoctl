@@ -71,3 +71,37 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_default_has_no_color() {
+        let settings = Settings::default();
+        assert_eq!(settings.last_color, None);
+    }
+
+    #[test]
+    fn serializes_settings_to_valid_toml() {
+        let settings = Settings {
+            last_color: Some("#00ff88".to_string()),
+        };
+        let toml_str = toml::to_string(&settings).expect("serialization failed");
+        assert!(toml_str.contains("last_color = \"#00ff88\""));
+    }
+
+    #[test]
+    fn parses_valid_toml_settings() {
+        let raw = "last_color = \"#ff0000\"\n";
+        let parsed: Settings = toml::from_str(raw).expect("deserialization failed");
+        assert_eq!(parsed.last_color, Some("#ff0000".to_string()));
+    }
+
+    #[test]
+    fn parses_empty_toml_as_default() {
+        let raw = "";
+        let parsed: Settings = toml::from_str(raw).expect("empty toml should parse");
+        assert_eq!(parsed.last_color, None);
+    }
+}
