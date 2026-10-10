@@ -44,7 +44,7 @@ impl eframe::App for KreoApp {
             ui.add_space(8.0);
 
             ui.horizontal_wrapped(|ui| {
-                for (name, preset) in PRESETS.iter() {
+                for (name, preset) in PRESETS {
                     if ui.button(name).clicked() {
                         self.color = preset.egui();
                     }
