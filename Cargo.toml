@@ -17,6 +17,7 @@ directories = "6"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
 hidapi = "2.6"
 serde = { version = "1", features = ["derive"] }
+thiserror = "2"
 toml = "0.8"
 
 [profile.release]

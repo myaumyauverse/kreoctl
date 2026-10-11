@@ -1,7 +1,8 @@
 #[cfg(feature = "gui")]
 use crate::{
+    color::{PRESETS, Rgb},
     config, device,
-    protocol::{PRESETS, Rgb},
+    error::KreoError,
 };
 
 #[cfg(feature = "gui")]
@@ -59,19 +60,19 @@ impl eframe::App for KreoApp {
                 let color = Rgb::from_egui(self.color);
                 match device::set_color(color).and_then(|_| config::save_last_color(color)) {
                     Ok(()) => self.status = format!("Applied {}", color.hex()),
-                    Err(e) => self.status = e,
+                    Err(e) => self.status = e.to_string(),
                 }
             }
             if ui.button("Restore saved color").clicked() {
                 match config::load_last_color() {
-                    Some(color) => match device::set_color(color) {
+                    Ok(color) => match device::set_color(color) {
                         Ok(()) => {
                             self.color = color.egui();
                             self.status = format!("Restored {}", color.hex());
                         }
-                        Err(e) => self.status = e,
+                        Err(e) => self.status = e.to_string(),
                     },
-                    None => self.status = "No saved color yet.".into(),
+                    Err(e) => self.status = e.to_string(),
                 }
             }
             ui.separator();
@@ -84,17 +85,17 @@ impl eframe::App for KreoApp {
 }
 
 #[cfg(feature = "gui")]
-pub fn run() -> Result<(), String> {
+pub fn run() -> Result<(), KreoError> {
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "kreoctl",
         options,
         Box::new(|_cc| Ok(Box::new(KreoApp::default()))),
     )
-    .map_err(|e| format!("Could not start GUI: {e}"))
+    .map_err(|e| KreoError::Gui(e.to_string()))
 }
 
 #[cfg(not(feature = "gui"))]
-pub fn run() -> Result<(), String> {
-    Err("kreoctl was compiled without GUI support. Rebuild with `--features gui` to enable the graphical interface.".into())
+pub fn run() -> Result<(), crate::error::KreoError> {
+    Err(crate::error::KreoError::GuiNotCompiled)
 }

@@ -1,4 +1,5 @@
-use crate::protocol::Rgb;
+use crate::color::{Rgb, parse_color};
+use crate::error::KreoError;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -8,9 +9,8 @@ struct Settings {
     last_color: Option<String>,
 }
 
-fn config_path() -> Result<PathBuf, String> {
-    let dirs = ProjectDirs::from("io", "kreoctl", "kreoctl")
-        .ok_or_else(|| "Could not determine the user config directory".to_string())?;
+fn config_path() -> Result<PathBuf, KreoError> {
+    let dirs = ProjectDirs::from("io", "kreoctl", "kreoctl").ok_or(KreoError::ConfigDirNotFound)?;
     Ok(dirs.config_dir().join("config.toml"))
 }
 
@@ -18,53 +18,60 @@ fn load_settings() -> Settings {
     let Ok(path) = config_path() else {
         return Settings::default();
     };
+    if !path.exists() {
+        return Settings::default();
+    }
     fs::read_to_string(path)
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default()
 }
 
-fn save_settings(settings: &Settings) -> Result<(), String> {
+fn save_settings(settings: &Settings) -> Result<(), KreoError> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Could not create config directory: {e}"))?;
+        fs::create_dir_all(parent)?;
     }
-    let contents =
-        toml::to_string_pretty(settings).map_err(|e| format!("Could not serialize config: {e}"))?;
-    fs::write(path, contents).map_err(|e| format!("Could not save config: {e}"))
+    let contents = toml::to_string_pretty(settings)
+        .map_err(|e| KreoError::Config(format!("Could not serialize config: {e}")))?;
+    fs::write(path, contents)?;
+    Ok(())
 }
 
-pub fn save_last_color(color: Rgb) -> Result<(), String> {
+/// Saves the currently applied color into the user's persistent config file.
+pub fn save_last_color(color: Rgb) -> Result<(), KreoError> {
     let mut settings = load_settings();
     settings.last_color = Some(color.hex());
     save_settings(&settings)
 }
 
-pub fn load_last_color() -> Option<Rgb> {
-    let value = load_settings().last_color?;
-    crate::protocol::parse_color(&value)
+/// Loads the last applied color from the user's persistent config file.
+pub fn load_last_color() -> Result<Rgb, KreoError> {
+    let settings = load_settings();
+    let value = settings.last_color.ok_or(KreoError::NoSavedColor)?;
+    parse_color(&value)
 }
 
-pub fn set_autostart(enabled: bool) -> Result<(), String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+/// Enables or disables restoring lighting automatically on desktop login via XDG Autostart.
+pub fn set_autostart(enabled: bool) -> Result<(), KreoError> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| KreoError::Autostart("HOME environment variable is not set".into()))?;
     let path = PathBuf::from(home).join(".config/autostart/kreoctl.desktop");
+
     if enabled {
-        let exe =
-            std::env::current_exe().map_err(|e| format!("Could not locate executable: {e}"))?;
+        let exe = std::env::current_exe()?;
         let parent = path
             .parent()
-            .ok_or_else(|| "Invalid autostart path".to_string())?;
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Could not create autostart directory: {e}"))?;
+            .ok_or_else(|| KreoError::Autostart("Invalid autostart destination path".into()))?;
+        fs::create_dir_all(parent)?;
         let contents = format!(
             "[Desktop Entry]\nType=Application\nName=kreoctl\nComment=Restore Kreo Hive keyboard lighting\nExec={} --restore\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
             exe.display()
         );
-        fs::write(&path, contents).map_err(|e| format!("Could not write autostart entry: {e}"))?;
+        fs::write(&path, contents)?;
         println!("Enabled login restore: {}", path.display());
     } else if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("Could not remove autostart entry: {e}"))?;
+        fs::remove_file(&path)?;
         println!("Disabled login restore.");
     } else {
         println!("Autostart was not enabled; nothing to remove.");

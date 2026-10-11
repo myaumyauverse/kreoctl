@@ -1,9 +1,9 @@
-mod config;
-mod device;
-mod gui;
-mod protocol;
-
 use clap::Parser;
+use kreoctl::{
+    color::{PRESETS, Rgb, parse_color},
+    config, device,
+    error::KreoError,
+};
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
@@ -40,7 +40,27 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    let result = if args.list_presets {
+    let result = run_command(args);
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("kreoctl: {error}");
+            if let KreoError::PermissionDenied(_) = &error {
+                eprintln!("\nTip: To control lighting without sudo, add the udev rule:");
+                eprintln!(
+                    "  echo 'KERNEL==\"hidraw*\", ATTRS{{idVendor}}==\"320f\", ATTRS{{idProduct}}==\"5055\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-kreo-hive.rules"
+                );
+                eprintln!("  sudo udevadm control --reload-rules && sudo udevadm trigger");
+                eprintln!("Then unplug and replug the keyboard.");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_command(args: Args) -> Result<(), KreoError> {
+    if args.list_presets {
         print_presets();
         Ok(())
     } else if args.enable_autostart {
@@ -48,46 +68,37 @@ fn main() -> ExitCode {
     } else if args.disable_autostart {
         config::set_autostart(false)
     } else if args.gui {
-        gui::run()
+        #[cfg(feature = "gui")]
+        {
+            kreoctl::gui::run()
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            Err(KreoError::GuiNotCompiled)
+        }
     } else if args.restore {
-        match config::load_last_color() {
-            Some(color) => apply_and_save(color),
-            None => Err("No saved color yet. Set a color first.".into()),
-        }
+        let color = config::load_last_color()?;
+        apply_and_save(color)
     } else if let Some(value) = args.color {
-        match protocol::parse_color(&value) {
-            Some(color) => apply_and_save(color),
-            None => Err(format!("Unknown color '{value}'. Use a preset or #RRGGBB.")),
-        }
+        let color = parse_color(&value)?;
+        apply_and_save(color)
     } else {
         #[cfg(feature = "gui")]
         {
-            gui::run()
+            kreoctl::gui::run()
         }
         #[cfg(not(feature = "gui"))]
         {
             use clap::CommandFactory;
             let mut cmd = Args::command();
-            match cmd.print_help() {
-                Ok(()) => {
-                    println!();
-                    Ok(())
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        }
-    };
-
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("kreoctl: {error}");
-            ExitCode::FAILURE
+            cmd.print_help()?;
+            println!();
+            Ok(())
         }
     }
 }
 
-fn apply_and_save(color: protocol::Rgb) -> Result<(), String> {
+fn apply_and_save(color: Rgb) -> Result<(), KreoError> {
     device::set_color(color)?;
     config::save_last_color(color)?;
     println!("Applied {}", color.hex());
@@ -95,7 +106,7 @@ fn apply_and_save(color: protocol::Rgb) -> Result<(), String> {
 }
 
 fn print_presets() {
-    for (name, color) in protocol::PRESETS {
+    for (name, color) in PRESETS {
         println!("{name:12} {}", color.hex());
     }
 }

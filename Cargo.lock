@@ -1297,6 +1297,7 @@ dependencies = [
  "eframe",
  "hidapi",
  "serde",
+ "thiserror 2.0.21",
  "toml",
 ]
 

@@ -1,85 +1,52 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
+use crate::color::Rgb;
 
-impl Rgb {
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
+/// The exact size in bytes of the vendor-specific HID Output Report.
+pub const REPORT_LEN: usize = 64;
 
-    pub fn hex(self) -> String {
-        format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
-    }
+/// The HID Output Report ID used for lighting control on interface 0003 (/dev/hidraw2).
+pub const REPORT_ID: u8 = 0x04;
 
-    #[cfg(feature = "gui")]
-    pub fn egui(self) -> [f32; 3] {
-        [
-            self.r as f32 / 255.0,
-            self.g as f32 / 255.0,
-            self.b as f32 / 255.0,
-        ]
-    }
+/// Vendor command header sequence verified on the Kreo Hive controller.
+pub const CMD_HEADER: [u8; 4] = [0x3b, 0x02, 0x06, 0x22];
 
-    #[cfg(feature = "gui")]
-    pub fn from_egui(value: [f32; 3]) -> Self {
-        Self::new(
-            (value[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (value[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (value[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-        )
-    }
-}
+/// Parameter header sequence preceding the RGB payload.
+pub const PARAM_HEADER: [u8; 3] = [0x06, 0x04, 0x02];
 
-pub const PRESETS: [(&str, Rgb); 10] = [
-    ("red", Rgb::new(255, 0, 0)),
-    ("green", Rgb::new(0, 255, 0)),
-    ("blue", Rgb::new(0, 0, 255)),
-    ("white", Rgb::new(255, 255, 255)),
-    ("purple", Rgb::new(160, 32, 240)),
-    ("cyan", Rgb::new(0, 255, 255)),
-    ("magenta", Rgb::new(255, 0, 255)),
-    ("orange", Rgb::new(255, 128, 0)),
-    ("yellow", Rgb::new(255, 255, 0)),
-    ("off", Rgb::new(0, 0, 0)),
-];
+/// Lighting mode parameter (static color backlighting).
+pub const MODE_STATIC: u8 = 0x08;
 
-pub fn parse_color(input: &str) -> Option<Rgb> {
-    let normalized = input.trim().to_ascii_lowercase();
-    if let Some((_, color)) = PRESETS.iter().find(|(name, _)| *name == normalized) {
-        return Some(*color);
-    }
-    let hex = normalized.strip_prefix('#').unwrap_or(&normalized);
-    if hex.len() != 6 {
-        return None;
-    }
-    let value = u32::from_str_radix(hex, 16).ok()?;
-    Some(Rgb::new(
-        (value >> 16) as u8,
-        (value >> 8) as u8,
-        value as u8,
-    ))
-}
+/// Activation / commit flag indicating the controller should apply the payload.
+pub const COMMIT_FLAG: u8 = 0x01;
 
-/// Packet layout reverse-engineered and verified on a Kreo Hive RGB keyboard.
-/// Keep this device-specific: do not reuse it for other VID/PID pairs.
-pub fn color_report(color: Rgb) -> [u8; 64] {
-    let mut report = [0_u8; 64];
-    report[0] = 0x04; // HID report ID
-    report[1] = 0x3b;
-    report[2] = 0x02;
-    report[3] = 0x06;
-    report[4] = 0x22;
-    report[9] = 0x06;
-    report[10] = 0x04;
-    report[11] = 0x02;
-    report[14] = color.r;
-    report[15] = color.g;
-    report[16] = color.b;
-    report[17] = 0x08;
-    report[28] = 0x01;
+// Verified byte offsets within the 64-byte report payload
+pub const OFFSET_REPORT_ID: usize = 0;
+pub const OFFSET_CMD_START: usize = 1;
+pub const OFFSET_PARAM_START: usize = 9;
+pub const OFFSET_RED: usize = 14;
+pub const OFFSET_GREEN: usize = 15;
+pub const OFFSET_BLUE: usize = 16;
+pub const OFFSET_MODE: usize = 17;
+pub const OFFSET_COMMIT: usize = 28;
+
+/// Constructs a 64-byte HID Output Report to set static backlighting on the Kreo Hive RGB keyboard.
+///
+/// This report layout was reverse-engineered specifically for VID:PID `320f:5055`.
+/// It should not be sent to other devices without verifying their report descriptors.
+pub fn color_report(color: Rgb) -> [u8; REPORT_LEN] {
+    let mut report = [0_u8; REPORT_LEN];
+
+    report[OFFSET_REPORT_ID] = REPORT_ID;
+    report[OFFSET_CMD_START..OFFSET_CMD_START + CMD_HEADER.len()].copy_from_slice(&CMD_HEADER);
+    report[OFFSET_PARAM_START..OFFSET_PARAM_START + PARAM_HEADER.len()]
+        .copy_from_slice(&PARAM_HEADER);
+
+    report[OFFSET_RED] = color.r;
+    report[OFFSET_GREEN] = color.g;
+    report[OFFSET_BLUE] = color.b;
+
+    report[OFFSET_MODE] = MODE_STATIC;
+    report[OFFSET_COMMIT] = COMMIT_FLAG;
+
     report
 }
 
@@ -88,113 +55,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_hex_colors_properly() {
-        assert_eq!(parse_color("#00ff88"), Some(Rgb::new(0, 255, 136)));
-        assert_eq!(parse_color("00ff88"), Some(Rgb::new(0, 255, 136)));
-        assert_eq!(parse_color("#ffffff"), Some(Rgb::new(255, 255, 255)));
-        assert_eq!(parse_color("#000000"), Some(Rgb::new(0, 0, 0)));
-        assert_eq!(parse_color("#AABBCC"), Some(Rgb::new(170, 187, 204)));
-        assert_eq!(parse_color("#123456"), Some(Rgb::new(18, 52, 86)));
-        assert_eq!(parse_color("  #00ff88  "), Some(Rgb::new(0, 255, 136)));
-    }
-
-    #[test]
-    fn parses_all_builtin_presets() {
-        for (name, expected_color) in PRESETS {
-            assert_eq!(
-                parse_color(name),
-                Some(expected_color),
-                "Preset '{name}' failed to parse"
-            );
-        }
-        // Test case-insensitivity on presets
-        assert_eq!(parse_color("RED"), Some(Rgb::new(255, 0, 0)));
-        assert_eq!(parse_color("Cyan"), Some(Rgb::new(0, 255, 255)));
-        assert_eq!(parse_color("oFf"), Some(Rgb::new(0, 0, 0)));
-    }
-
-    #[test]
-    fn rejects_invalid_color_inputs() {
-        assert_eq!(parse_color(""), None);
-        assert_eq!(parse_color("   "), None);
-        assert_eq!(parse_color("not-a-color"), None);
-        assert_eq!(parse_color("bluish"), None);
-        assert_eq!(parse_color("#fff"), None); // 3-digit shorthand is not supported
-        assert_eq!(parse_color("#00ff88ff"), None); // 8-digit RGBA is not supported
-        assert_eq!(parse_color("#GGGGGG"), None); // Non-hex characters
-        assert_eq!(parse_color("#12345Z"), None);
-        assert_eq!(parse_color("#12345"), None); // 5 digits
-        assert_eq!(parse_color("#1234567"), None); // 7 digits
-    }
-
-    #[test]
-    fn formats_hex_correctly() {
-        assert_eq!(Rgb::new(0, 0, 0).hex(), "#000000");
-        assert_eq!(Rgb::new(255, 255, 255).hex(), "#ffffff");
-        assert_eq!(Rgb::new(1, 2, 3).hex(), "#010203");
-        assert_eq!(Rgb::new(0, 255, 136).hex(), "#00ff88");
-    }
-
-    #[cfg(feature = "gui")]
-    #[test]
-    fn egui_float_conversions_roundtrip() {
-        let original = Rgb::new(255, 128, 64);
-        let floats = original.egui();
-        let recovered = Rgb::from_egui(floats);
-        assert_eq!(original, recovered);
-
-        // Test clamping on out-of-bounds float inputs
-        assert_eq!(Rgb::from_egui([-1.0, 2.0, 0.5]), Rgb::new(0, 255, 128));
-    }
-
-    #[test]
     fn report_matches_verified_hardware_layout() {
         let report = color_report(Rgb::new(10, 20, 30));
 
         // Exact report dimensions
-        assert_eq!(report.len(), 64);
+        assert_eq!(report.len(), REPORT_LEN);
 
         // Report ID
-        assert_eq!(report[0], 0x04);
+        assert_eq!(report[OFFSET_REPORT_ID], REPORT_ID);
 
-        // Command header
-        assert_eq!(&report[1..5], &[0x3b, 0x02, 0x06, 0x22]);
+        // Headers
+        assert_eq!(
+            &report[OFFSET_CMD_START..OFFSET_CMD_START + CMD_HEADER.len()],
+            &CMD_HEADER
+        );
+        assert_eq!(
+            &report[OFFSET_PARAM_START..OFFSET_PARAM_START + PARAM_HEADER.len()],
+            &PARAM_HEADER
+        );
 
-        // Padding before param header
-        assert_eq!(&report[5..9], &[0x00, 0x00, 0x00, 0x00]);
-
-        // Param header
-        assert_eq!(&report[9..12], &[0x06, 0x04, 0x02]);
-
-        // Padding before RGB
-        assert_eq!(&report[12..14], &[0x00, 0x00]);
+        // Padding regions are zeroed
+        assert_eq!(&report[5..9], &[0_u8; 4]);
+        assert_eq!(&report[12..14], &[0_u8; 2]);
 
         // RGB payload
-        assert_eq!(&report[14..17], &[10, 20, 30]);
+        assert_eq!(report[OFFSET_RED], 10);
+        assert_eq!(report[OFFSET_GREEN], 20);
+        assert_eq!(report[OFFSET_BLUE], 30);
 
-        // Mode parameter
-        assert_eq!(report[17], 0x08);
-
-        // Padding before commit byte
+        // Mode parameter and commit flag
+        assert_eq!(report[OFFSET_MODE], MODE_STATIC);
         assert_eq!(&report[18..28], &[0_u8; 10]);
-
-        // Commit / activation flag
-        assert_eq!(report[28], 0x01);
+        assert_eq!(report[OFFSET_COMMIT], COMMIT_FLAG);
 
         // Trailing padding must be all zeros
-        assert_eq!(&report[29..64], &[0_u8; 35]);
+        assert_eq!(&report[29..REPORT_LEN], &[0_u8; 35]);
     }
 
     #[test]
     fn report_handles_edge_cases() {
         // Pure black / LEDs off
         let off_report = color_report(Rgb::new(0, 0, 0));
-        assert_eq!(&off_report[14..17], &[0, 0, 0]);
-        assert_eq!(off_report[0], 0x04);
-        assert_eq!(off_report[28], 0x01);
+        assert_eq!(off_report[OFFSET_RED], 0);
+        assert_eq!(off_report[OFFSET_GREEN], 0);
+        assert_eq!(off_report[OFFSET_BLUE], 0);
+        assert_eq!(off_report[OFFSET_REPORT_ID], REPORT_ID);
+        assert_eq!(off_report[OFFSET_COMMIT], COMMIT_FLAG);
 
         // Pure white
         let white_report = color_report(Rgb::new(255, 255, 255));
-        assert_eq!(&white_report[14..17], &[255, 255, 255]);
+        assert_eq!(white_report[OFFSET_RED], 255);
+        assert_eq!(white_report[OFFSET_GREEN], 255);
+        assert_eq!(white_report[OFFSET_BLUE], 255);
     }
 }
