@@ -1,13 +1,15 @@
+use crate::backend::{DeviceBackend, HidBackend};
 use crate::color::Rgb;
 use crate::error::KreoError;
 use crate::protocol::color_report;
-use hidapi::{HidApi, HidDevice};
+use hidapi::HidApi;
 
 pub const VENDOR_ID: u16 = 0x320f;
 pub const PRODUCT_ID: u16 = 0x5055;
-pub const RGB_INTERFACE: i32 = 1; // verified on the user's Kreo Hive: USB interface 1 -> hidraw2
+pub const RGB_INTERFACE: i32 = 1; // verified on Kreo Hive: USB interface 1 -> hidraw2
 
-fn open_rgb_interface() -> Result<HidDevice, KreoError> {
+/// Discover and open the keyboard's vendor lighting interface.
+pub fn open_device() -> Result<HidBackend, KreoError> {
     let api = HidApi::new().map_err(|e| KreoError::Hid(e.to_string()))?;
     let candidates: Vec<_> = api
         .device_list()
@@ -25,7 +27,7 @@ fn open_rgb_interface() -> Result<HidDevice, KreoError> {
             interface: RGB_INTERFACE,
         })?;
 
-    api.open_path(info.path()).map_err(|e| {
+    let device = api.open_path(info.path()).map_err(|e| {
         let err_msg = e.to_string();
         if err_msg.to_lowercase().contains("permission")
             || err_msg.to_lowercase().contains("access")
@@ -34,20 +36,41 @@ fn open_rgb_interface() -> Result<HidDevice, KreoError> {
         } else {
             KreoError::Hid(err_msg)
         }
-    })
+    })?;
+
+    Ok(HidBackend::new(device))
 }
 
+/// Apply a static color to the physical keyboard using the auto-discovered HID backend.
 pub fn set_color(color: Rgb) -> Result<(), KreoError> {
-    let device = open_rgb_interface()?;
+    let mut backend = open_device()?;
+    set_color_with_backend(&mut backend, color)
+}
+
+/// Apply a static color using an explicit backend (useful for testing and dependency injection).
+pub fn set_color_with_backend(
+    backend: &mut dyn DeviceBackend,
+    color: Rgb,
+) -> Result<(), KreoError> {
     let report = color_report(color);
-    let written = device
-        .write(&report)
-        .map_err(|e| KreoError::Hid(e.to_string()))?;
-    if written != report.len() {
-        return Err(KreoError::ShortWrite {
-            sent: written,
-            expected: report.len(),
-        });
+    backend.write_report(&report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::MockBackend;
+
+    #[test]
+    fn set_color_with_mock_backend_succeeds() {
+        let mut mock = MockBackend::new();
+        let color = Rgb::new(0, 128, 255);
+
+        assert!(set_color_with_backend(&mut mock, color).is_ok());
+        assert_eq!(mock.report_count(), 1);
+        let report = mock.last_report().unwrap();
+        assert_eq!(report[14], 0);
+        assert_eq!(report[15], 128);
+        assert_eq!(report[16], 255);
     }
-    Ok(())
 }
