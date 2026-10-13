@@ -1,7 +1,7 @@
 use crate::backend::{DeviceBackend, HidBackend};
 use crate::color::Rgb;
 use crate::error::KreoError;
-use crate::protocol::color_report;
+use crate::protocol::{LightingConfig, build_report, color_report};
 use hidapi::HidApi;
 
 pub const VENDOR_ID: u16 = 0x320f;
@@ -56,10 +56,26 @@ pub fn set_color_with_backend(
     backend.write_report(&report)
 }
 
+/// Apply an arbitrary LightingConfig (mode, speed, brightness, color) to the keyboard.
+pub fn set_lighting(config: &LightingConfig) -> Result<(), KreoError> {
+    let mut backend = open_device()?;
+    set_lighting_with_backend(&mut backend, config)
+}
+
+/// Apply a LightingConfig using an explicit backend.
+pub fn set_lighting_with_backend(
+    backend: &mut dyn DeviceBackend,
+    config: &LightingConfig,
+) -> Result<(), KreoError> {
+    let report = build_report(config);
+    backend.write_report(&report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::MockBackend;
+    use crate::protocol::LightingMode;
 
     #[test]
     fn set_color_with_mock_backend_succeeds() {
@@ -72,5 +88,22 @@ mod tests {
         assert_eq!(report[14], 0);
         assert_eq!(report[15], 128);
         assert_eq!(report[16], 255);
+    }
+
+    #[test]
+    fn set_lighting_with_mock_backend_succeeds() {
+        let mut mock = MockBackend::new();
+        let cfg = LightingConfig {
+            mode: LightingMode::Breathing,
+            color: Rgb::new(255, 100, 0),
+            brightness: 5,
+            speed: 4,
+        };
+
+        assert!(set_lighting_with_backend(&mut mock, &cfg).is_ok());
+        assert_eq!(mock.report_count(), 1);
+        let report = mock.last_report().unwrap();
+        assert_eq!(report[4], crate::protocol::MODE_BYTE_BREATHING);
+        assert_eq!(report[5], 4);
     }
 }
