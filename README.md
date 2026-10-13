@@ -1,20 +1,21 @@
 # kreoctl
 
-A lightweight Linux CLI and GUI tool to control RGB lighting on the **Kreo Hive RGB** keyboard (`0x320f:0x5055`).
+A lightweight Linux CLI and GUI tool to control RGB lighting on the **Kreo Hive RGB** mechanical keyboard (`0x320f:0x5055`).
 
-I built this because the official software is Windows-only, and I wanted a simple, native way to control the keyboard's backlighting on Linux without dealing with custom kernel drivers, wine, or running Python scripts as root. It talks directly to the keyboard via Linux `hidraw` using Rust.
-
-> **Current status:** Works for static colors (presets and hex codes). Tested and verified on physical hardware. Brightness control, animations, and per-key lighting are not reverse-engineered yet.
+I built this because the official software is Windows-only, and I wanted a simple, native way to control the keyboard's backlighting on Linux without dealing with custom kernel drivers, wine, or running Python scripts as root. It talks directly to the keyboard via Linux `hidraw` using 100% safe Rust.
 
 ---
 
-## What works right now
+## What works
 
-- **CLI:** Quick commands to set colors (`kreoctl red`, `kreoctl cyan`, `kreoctl '#00ff88'`, `kreoctl off`).
-- **GUI:** Optional graphical color picker and palette (`kreoctl --gui`).
-- **Remember color:** Saves your choice to `~/.config/kreoctl/config.toml` so `kreoctl --restore` re-applies it.
-- **Autostart:** Can write an XDG autostart file to restore your color when you log in.
-- **Safe:** Runs in userspace via `hidraw` with a simple udev rule. No kernel modules, no root daemon.
+- **CLI:** Instant lighting changes with presets (`red`, `cyan`, `off`), hex codes (`#00ff88`), modes, brightness, and speed.
+- **Lighting Modes:** Support for Static, Breathing, Spectrum Cycle, Rainbow Wave, Reactive, and Off.
+- **Brightness & Speed:** Granular 5-level brightness and animation speed control (`--brightness 1..5`, `--speed 1..5`).
+- **Real-Time Streaming:** Live terminal software animation loop (`kreoctl --stream --mode cycle`).
+- **GUI:** Optional graphical interface (`kreoctl --gui`) with live color preview, mode selectors, and sliders.
+- **Persistent State:** Automatically remembers your color, mode, brightness, and speed in `~/.config/kreoctl/config.toml`.
+- **System Integration:** Includes standard udev rules, systemd user restore service, and an XDG desktop entry.
+- **Testing & Mocking:** Full test suite (34 tests) with an in-memory `MockBackend` to verify protocols without hardware attached.
 
 ---
 
@@ -24,87 +25,99 @@ I built this because the official software is Windows-only, and I wanted a simpl
 - **USB IDs:** `320f:5055` (Evision / Telink controller)
 - **Protocol:** 64-byte HID output report on interface `0003` (`/dev/hidraw2`).
 
-Other keyboards with this vendor ID might share the protocol, but this tool is specifically tested on the Kreo Hive.
-
 ---
 
-## How to build and run
+## Installation & Build
 
-### 1. Install prerequisites (Arch Linux)
-
-```bash
-sudo pacman -S --needed rust cargo pkgconf hidapi
-```
-
-### 2. Build
+### 1. Quick Install from Source
 
 ```bash
 git clone https://github.com/myaumyauverse/kreoctl.git
 cd kreoctl
+./install.sh
+```
 
-# Build the fast CLI binary
+### 2. Manual Cargo Build
+
+```bash
+# Fast, lightweight CLI-only binary (compiles in seconds)
 cargo build --release
 
-# Or build with the GUI included
+# Or compile with GUI support (eframe / egui)
 cargo build --release --features gui
 ```
 
-The compiled binary will be in `target/release/kreoctl`.
+The compiled binary will be located at `target/release/kreoctl`.
 
 ---
 
 ## Usage
 
 ```bash
-# See all options
-./target/release/kreoctl --help
+# View all flags and options
+kreoctl --help
 
-# Set built-in presets
-./target/release/kreoctl red
-./target/release/kreoctl blue
-./target/release/kreoctl cyan
-./target/release/kreoctl off
+# Set built-in color presets
+kreoctl red
+kreoctl cyan
+kreoctl '#00ff88'
 
-# Set any hex color
-./target/release/kreoctl '#00ff88'
-./target/release/kreoctl '#ff5500'
+# Set lighting modes
+kreoctl --mode breathing red
+kreoctl --mode wave --speed 5
+kreoctl --mode cycle --brightness 3
+kreoctl --mode off
 
-# List all available presets
-./target/release/kreoctl --list-presets
+# Stream real-time software rainbow animation (Ctrl+C or Enter to stop)
+kreoctl --stream --mode cycle --speed 4
 
-# Restore the last saved color
-./target/release/kreoctl --restore
+# Open the graphical interface
+kreoctl --gui
 
-# Open the graphical color picker (if built with --features gui)
-./target/release/kreoctl --gui
+# Restore saved settings
+kreoctl --restore
 
-# Enable/disable restoring color automatically at login
-./target/release/kreoctl --enable-autostart
-./target/release/kreoctl --disable-autostart
+# List color presets
+kreoctl --list-presets
+
+# Manage desktop autostart
+kreoctl --enable-autostart
+kreoctl --disable-autostart
 ```
 
 ---
 
 ## Running without `sudo` (udev rule)
 
-By default, Linux protects raw HID devices (`/dev/hidraw*`) so only root can write to them. To use `kreoctl` as your normal user, add a udev rule:
+To access the keyboard's lighting interface as a regular user, install the included udev rule:
 
 ```bash
-echo 'KERNEL=="hidraw*", ATTRS{idVendor}=="320f", ATTRS{idProduct}=="5055", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/60-kreo-hive.rules
+sudo cp udev/99-kreoctl.rules /etc/udev/rules.d/99-kreoctl.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Then unplug and plug the keyboard back in.
+Then unplug and reconnect your keyboard once.
 
 ---
 
-## Notes & Architecture
+## Automatic Restore on Login (systemd)
 
-If you're interested in the code or reverse engineering notes:
-- [Hardware Protocol](docs/HARDWARE_PROTOCOL.md) — The 64-byte packet layout and what each byte does.
-- [Architecture](docs/ARCHITECTURE.md) — How the code is organized.
-- [Project Rationale](docs/PROJECT_RATIONALE.md) — Why I chose userspace Rust instead of a kernel module or Python.
-- [Alternatives Considered](docs/ALTERNATIVES.md) — Comparison with existing tools and OpenRGB.
+You can automatically re-apply your last saved lighting whenever you log in via systemd user services:
+
+```bash
+mkdir -p ~/.config/systemd/user/
+cp systemd/kreoctl-restore.service ~/.config/systemd/user/
+systemctl --user enable --now kreoctl-restore.service
+```
+
+---
+
+## Architecture & Documentation
+
+- [Hardware Protocol](docs/HARDWARE_PROTOCOL.md) — 64-byte packet layout, mode bytes, and intensity parameters.
+- [System Architecture](docs/ARCHITECTURE.md) — Component responsibilities, `DeviceBackend` trait, and runtime data flow.
+- [Project Rationale](docs/PROJECT_RATIONALE.md) — Why safe Rust userspace was chosen over kernel modules or Python.
+- [Alternatives Considered](docs/ALTERNATIVES.md) — Technical comparison with OpenRGB and other solutions.
 
 ---
 
