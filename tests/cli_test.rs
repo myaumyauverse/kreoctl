@@ -67,3 +67,27 @@ fn test_cli_rejects_invalid_hex() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("kreoctl: Unknown color '#XYZ123'"));
 }
+
+#[test]
+fn test_cli_rejects_out_of_range_brightness() {
+    let output = kreoctl_bin()
+        .args(["--brightness", "10"])
+        .output()
+        .expect("failed to run kreoctl");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not in 1..=5"));
+}
+
+#[test]
+fn test_cli_rejects_invalid_mode() {
+    let output = kreoctl_bin()
+        .args(["--mode", "hyperspace"])
+        .output()
+        .expect("failed to run kreoctl");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid value 'hyperspace'"));
+}
