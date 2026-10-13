@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod backend;
 pub mod color;
 pub mod config;
@@ -11,4 +12,4 @@ pub mod gui;
 pub use backend::{DeviceBackend, HidBackend, MockBackend};
 pub use color::{PRESETS, Rgb, parse_color};
 pub use error::KreoError;
-pub use protocol::color_report;
+pub use protocol::{LightingConfig, LightingMode, build_report, color_report};
