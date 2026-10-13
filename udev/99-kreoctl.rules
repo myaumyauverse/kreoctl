@@ -1,0 +1,3 @@
+# Kreo Hive RGB Mechanical Keyboard (0x320f:0x5055)
+# Grants active logged-in users permission to write HID lighting reports without sudo.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}==320f, ATTRS{idProduct}==5055, TAG+="uaccess"

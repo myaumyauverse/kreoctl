@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore Kreo Hive RGB keyboard lighting
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/kreoctl --restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target
