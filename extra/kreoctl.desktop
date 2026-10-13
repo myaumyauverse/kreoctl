@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=kreoctl
+Comment=Kreo Hive RGB Keyboard Controller
+Exec=kreoctl --gui
+Icon=input-keyboard
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;
+Keywords=rgb;keyboard;kreo;lighting;
