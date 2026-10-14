@@ -1,6 +1,6 @@
 use crate::color::{Rgb, parse_color};
 use crate::error::KreoError;
-use crate::protocol::{LightingConfig, LightingMode};
+use crate::protocol::{BRIGHTNESS_MAX, LightingConfig, LightingMode};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -58,7 +58,10 @@ pub fn load_last_lighting() -> Result<LightingConfig, KreoError> {
     let color_str = settings.last_color.ok_or(KreoError::NoSavedColor)?;
     let color = parse_color(&color_str)?;
     let mode = settings.mode.unwrap_or(LightingMode::Static);
-    let brightness = settings.brightness.unwrap_or(4);
+    let brightness = settings
+        .brightness
+        .unwrap_or(BRIGHTNESS_MAX)
+        .min(BRIGHTNESS_MAX);
     let speed = settings.speed.unwrap_or(3);
 
     Ok(LightingConfig {
@@ -66,6 +69,8 @@ pub fn load_last_lighting() -> Result<LightingConfig, KreoError> {
         color,
         brightness,
         speed,
+        direction: 0,
+        multicolor: mode.is_inherently_multicolor(),
     })
 }
 
@@ -140,7 +145,11 @@ speed = 4
         };
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains(r##"last_color = "#00ff88""##));
-        assert!(text.contains(r#"mode = "cycle""#));
+        assert!(text.contains(r#"mode = "spectrum""#));
+
+        // Verify backwards compatible deserialization of legacy "cycle"
+        let legacy: Settings = toml::from_str(r#"mode = "cycle""#).unwrap();
+        assert_eq!(legacy.mode, Some(LightingMode::Spectrum));
     }
 
     #[test]

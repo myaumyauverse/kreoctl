@@ -1,7 +1,8 @@
 use crate::backend::DeviceBackend;
 use crate::color::Rgb;
+use crate::device;
 use crate::error::KreoError;
-use crate::protocol::{LightingConfig, LightingMode, build_report};
+use crate::protocol::{LightingConfig, LightingMode};
 use std::f32::consts::PI;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +57,8 @@ pub fn speed_to_delay(speed: u8) -> Duration {
 }
 
 /// Streams software animation frames to the provided DeviceBackend until stopped.
+///
+/// Each frame is written as a Normal-mode color into the active profile.
 pub fn stream_animation<B: DeviceBackend>(
     backend: &mut B,
     mode: LightingMode,
@@ -75,21 +78,18 @@ pub fn stream_animation<B: DeviceBackend>(
 
         let progress = (step % total_cycle_steps) as f32 / total_cycle_steps as f32;
         let color = match mode {
-            LightingMode::Cycle | LightingMode::Wave => rainbow_hue(progress),
-            LightingMode::Breathing => breathing_color(base_color, progress),
-            LightingMode::Static => base_color,
+            LightingMode::Spectrum
+            | LightingMode::Wave
+            | LightingMode::Corrugated
+            | LightingMode::Cloud
+            | LightingMode::Serpentine
+            | LightingMode::Roll => rainbow_hue(progress),
+            LightingMode::Breath => breathing_color(base_color, progress),
             LightingMode::Off => Rgb::new(0, 0, 0),
-            LightingMode::Reactive => base_color,
+            _ => base_color,
         };
 
-        let cfg = LightingConfig {
-            mode: LightingMode::Static,
-            color,
-            brightness: 4,
-            speed,
-        };
-        let report = build_report(&cfg);
-        backend.write_report(&report)?;
+        device::set_lighting_with_backend(backend, &LightingConfig::new_static(color))?;
 
         step += 1;
         sleep(delay);
@@ -142,6 +142,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(mock.report_count(), 10);
+        // begin + profile read + block write + end per frame
+        assert_eq!(mock.report_count(), 10 * 4);
     }
 }
