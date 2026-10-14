@@ -194,6 +194,28 @@ pub fn set_lighting_with_backend(
     })
 }
 
+/// Query the keyboard directly for its current onboard lighting state.
+pub fn read_current_lighting() -> Result<LightingConfig, KreoError> {
+    let mut backend = open_device()?;
+    read_current_lighting_with_backend(&mut backend)
+}
+
+/// Query the keyboard state with an explicit backend.
+pub fn read_current_lighting_with_backend(
+    backend: &mut dyn DeviceBackend,
+) -> Result<LightingConfig, KreoError> {
+    let profile = read_active_profile(backend)?.min(protocol::MAX_PROFILE_INDEX);
+    let data = read_chunked(
+        backend,
+        protocol::CMD_READ_CONFIG,
+        protocol::profile_offset(profile),
+        protocol::MODE_BLOCK_LEN,
+    )?;
+    let mut block = [0_u8; protocol::MODE_BLOCK_LEN];
+    block.copy_from_slice(&data);
+    Ok(protocol::decode_mode_block(&block))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +290,32 @@ mod tests {
         assert_eq!(mock.written_reports[2][5], 0x00);
         assert_eq!(mock.written_reports[2][8], 0x00);
         assert_eq!(mock.written_reports[3][5], 0x01);
+    }
+
+    #[test]
+    fn read_back_decodes_profile_block() {
+        let mut mock = MockBackend::new();
+        let mut reply = protocol::build_query(CMD_READ_CONFIG, 0, 1, &[]);
+        reply[8] = 1; // profile 2
+        mock.queue_read_report(reply);
+        let block = protocol::encode_mode_block(&LightingConfig {
+            mode: LightingMode::Wave,
+            color: Rgb::new(9, 8, 7),
+            brightness: 2,
+            speed: 5,
+            direction: 1,
+            multicolor: true,
+        });
+        let req = protocol::build_query(CMD_READ_CONFIG, 0x41, 18, &[]);
+        let mut reply = req;
+        reply[8..26].copy_from_slice(&block);
+        mock.queue_read_report(reply);
+
+        let cfg = read_current_lighting_with_backend(&mut mock).unwrap();
+        assert_eq!(cfg.mode, LightingMode::Wave);
+        assert_eq!(cfg.color, Rgb::new(9, 8, 7));
+        assert_eq!(cfg.speed, 5);
+        assert!(cfg.multicolor);
     }
 
     #[test]
