@@ -151,6 +151,14 @@ fn active_profile_for_write(backend: &mut dyn DeviceBackend) -> Result<u8, KreoE
     Ok(profile)
 }
 
+/// Returns the number of LED slots in the keyboard's color memory.
+pub fn read_led_map_size(backend: &mut dyn DeviceBackend) -> usize {
+    match read_chunked(backend, protocol::CMD_READ_CAPABILITIES, 0, 7) {
+        Ok(caps) if caps[0] == 0xAA && caps[1] == 0x55 && caps[5] > 0 => caps[5] as usize,
+        _ => protocol::DEFAULT_MAP_SIZE,
+    }
+}
+
 /// Apply a static color to the physical keyboard using the auto-discovered HID backend.
 pub fn set_color(color: Rgb) -> Result<(), KreoError> {
     let cfg = LightingConfig::new_static(color);
@@ -194,6 +202,35 @@ pub fn set_lighting_with_backend(
     })
 }
 
+/// Apply custom per-key colors (3 bytes per LED slot) to the hardware keyboard.
+pub fn set_per_key_colors(color_buffer: &[u8], brightness: u8) -> Result<(), KreoError> {
+    let mut backend = open_device()?;
+    set_per_key_colors_with_backend(&mut backend, color_buffer, brightness)
+}
+
+/// Uploads per-key colors into custom colorset 1 and switches the keyboard to Custom mode.
+pub fn set_per_key_colors_with_backend(
+    backend: &mut dyn DeviceBackend,
+    color_buffer: &[u8],
+    brightness: u8,
+) -> Result<(), KreoError> {
+    let map_size = read_led_map_size(backend);
+    let mut colors = color_buffer.to_vec();
+    colors.resize(map_size * 3, 0);
+
+    transaction(backend, |backend| {
+        write_chunked(backend, protocol::CMD_WRITE_CUSTOM_COLORS, 0, &colors)
+    })?;
+
+    let cfg = LightingConfig {
+        mode: LightingMode::Custom,
+        brightness,
+        multicolor: false,
+        ..LightingConfig::default()
+    };
+    set_lighting_with_backend(backend, &cfg)
+}
+
 /// Query the keyboard directly for its current onboard lighting state.
 pub fn read_current_lighting() -> Result<LightingConfig, KreoError> {
     let mut backend = open_device()?;
@@ -221,7 +258,8 @@ mod tests {
     use super::*;
     use crate::backend::MockBackend;
     use crate::protocol::{
-        CMD_BEGIN, CMD_END, CMD_READ_CONFIG, CMD_WRITE_CONFIG, MODE_BYTE_BREATH, MODE_BYTE_NORMAL,
+        CMD_BEGIN, CMD_END, CMD_READ_CAPABILITIES, CMD_READ_CONFIG, CMD_WRITE_CONFIG,
+        CMD_WRITE_CUSTOM_COLORS, MODE_BYTE_BREATH, MODE_BYTE_CUSTOM, MODE_BYTE_NORMAL,
     };
 
     fn commands(mock: &MockBackend) -> Vec<u8> {
@@ -290,6 +328,34 @@ mod tests {
         assert_eq!(mock.written_reports[2][5], 0x00);
         assert_eq!(mock.written_reports[2][8], 0x00);
         assert_eq!(mock.written_reports[3][5], 0x01);
+    }
+
+    #[test]
+    fn per_key_upload_uses_custom_color_memory() {
+        let mut mock = MockBackend::new();
+        let buf = [0x55_u8; protocol::TOTAL_COLOR_BYTES];
+
+        set_per_key_colors_with_backend(&mut mock, &buf, 3).unwrap();
+        let cmds = commands(&mock);
+        assert_eq!(cmds[0], CMD_READ_CAPABILITIES);
+        assert_eq!(cmds[1], CMD_BEGIN);
+        let chunks = protocol::TOTAL_COLOR_BYTES.div_ceil(MAX_PAYLOAD);
+        for c in &cmds[2..2 + chunks] {
+            assert_eq!(*c, CMD_WRITE_CUSTOM_COLORS);
+        }
+        assert_eq!(cmds[2 + chunks], CMD_END);
+
+        let mode_write = mock
+            .written_reports
+            .iter()
+            .find(|r| r[3] == CMD_WRITE_CONFIG && r[5] == 0x01)
+            .unwrap();
+        assert_eq!(mode_write[8], MODE_BYTE_CUSTOM);
+        assert_eq!(mode_write[9], 3);
+        let colorset = mock.written_reports.iter().find(|r| {
+            r[3] == CMD_WRITE_CONFIG && r[5] as u16 == 0x01 + protocol::PARAM_CUSTOM_COLORSET
+        });
+        assert!(colorset.is_some());
     }
 
     #[test]
