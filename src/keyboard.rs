@@ -183,6 +183,159 @@ impl KeyboardModel {
     pub fn get_key_color(&self, code: &str, fallback: Rgb) -> Rgb {
         self.per_key_colors.get(code).copied().unwrap_or(fallback)
     }
+
+    /// Builds the per-key color buffer (3 bytes per LED slot) for custom hardware upload.
+    pub fn build_led_buffer(&self, fallback: Rgb) -> [u8; crate::protocol::TOTAL_COLOR_BYTES] {
+        let mut buf = [0_u8; crate::protocol::TOTAL_COLOR_BYTES];
+        // Initialize all LED slots with the base / fallback color
+        for led in buf.as_chunks_mut::<3>().0 {
+            *led = [fallback.r, fallback.g, fallback.b];
+        }
+        // Map individual configured keys onto their LED slots
+        for key in &self.keys {
+            let col = self.get_key_color(key.code, fallback);
+            for &slot in key_led_slots(self.variant, key.code) {
+                if slot < crate::protocol::TOTAL_LEDS {
+                    buf[slot * 3..slot * 3 + 3].copy_from_slice(&[col.r, col.g, col.b]);
+                }
+            }
+        }
+        buf
+    }
+}
+
+/// Number of LED slots per matrix column. The firmware numbers LEDs down each
+/// column: slot = column * LEDS_PER_COLUMN + row.
+const LEDS_PER_COLUMN: usize = 8;
+
+const fn slot(col: usize, row: usize) -> usize {
+    col * LEDS_PER_COLUMN + row
+}
+
+/// The space bar spans several matrix columns; light all of them.
+const SPACE_SLOTS: [usize; 6] = [
+    slot(3, 5),
+    slot(4, 5),
+    slot(5, 5),
+    slot(6, 5),
+    slot(7, 5),
+    slot(8, 5),
+];
+
+/// Returns the LED slots lit by a key, verified on a Hive 75 by probing each slot.
+///
+/// The Hive 65 is assumed to share the 75's matrix for keys both boards have.
+pub fn key_led_slots(_variant: KeyboardVariant, code: &str) -> &'static [usize] {
+    let (col, row) = match code {
+        "Space" => return &SPACE_SLOTS,
+        "Knob" => return &[],
+        // Row 0
+        "Esc" => (0, 0),
+        "F1" => (1, 0),
+        "F2" => (2, 0),
+        "F3" => (3, 0),
+        "F4" => (4, 0),
+        "F5" => (5, 0),
+        "F6" => (6, 0),
+        "F7" => (7, 0),
+        "F8" => (8, 0),
+        "F9" => (9, 0),
+        "F10" => (10, 0),
+        "F11" => (11, 0),
+        "F12" => (12, 0),
+        "Del" => (13, 0),
+        // Row 1
+        "Grave" => (0, 1),
+        "1" => (1, 1),
+        "2" => (2, 1),
+        "3" => (3, 1),
+        "4" => (4, 1),
+        "5" => (5, 1),
+        "6" => (6, 1),
+        "7" => (7, 1),
+        "8" => (8, 1),
+        "9" => (9, 1),
+        "0" => (10, 1),
+        "Minus" => (11, 1),
+        "Equal" => (12, 1),
+        "Backspace" => (13, 1),
+        // Row 2
+        "Tab" => (0, 2),
+        "Q" => (1, 2),
+        "W" => (2, 2),
+        "E" => (3, 2),
+        "R" => (4, 2),
+        "T" => (5, 2),
+        "Y" => (6, 2),
+        "U" => (7, 2),
+        "I" => (8, 2),
+        "O" => (9, 2),
+        "P" => (10, 2),
+        "LBracket" => (11, 2),
+        "RBracket" => (12, 2),
+        "Backslash" => (13, 2),
+        "Ins" => (14, 2),
+        "PgDn" => (15, 2),
+        // Row 3
+        "CapsLock" => (0, 3),
+        "A" => (1, 3),
+        "S" => (2, 3),
+        "D" => (3, 3),
+        "F" => (4, 3),
+        "G" => (5, 3),
+        "H" => (6, 3),
+        "J" => (7, 3),
+        "K" => (8, 3),
+        "L" => (9, 3),
+        "Semicolon" => (10, 3),
+        "Quote" => (11, 3),
+        "Enter" => (13, 3),
+        "End" => (14, 3),
+        "PgUp" => (15, 3),
+        // Row 4
+        "LShift" => (0, 4),
+        "Z" => (2, 4),
+        "X" => (3, 4),
+        "C" => (4, 4),
+        "V" => (5, 4),
+        "B" => (6, 4),
+        "N" => (7, 4),
+        "M" => (8, 4),
+        "Comma" => (9, 4),
+        "Period" => (10, 4),
+        "Slash" => (11, 4),
+        "RShift" => (13, 4),
+        "Up" => (14, 4),
+        // Row 5
+        "LCtrl" => (0, 5),
+        "LWin" => (1, 5),
+        "LAlt" => (2, 5),
+        "RAlt" => (9, 5),
+        "Fn" => (10, 5),
+        "RCtrl" => (12, 5),
+        "Left" => (13, 5),
+        "Down" => (14, 5),
+        "Right" => (15, 5),
+        _ => return &[],
+    };
+    let s = slot(col, row);
+    &SLOT_TABLE[s..s + 1]
+}
+
+/// Every slot index, so single-slot lookups can return a `&'static [usize]`.
+const SLOT_TABLE: [usize; crate::protocol::TOTAL_LEDS] = {
+    let mut t = [0; crate::protocol::TOTAL_LEDS];
+    let mut i = 0;
+    while i < t.len() {
+        t[i] = i;
+        i += 1;
+    }
+    t
+};
+
+/// Returns the first LED slot for a given key code.
+pub fn key_code_to_led_index(variant: KeyboardVariant, code: &str) -> Option<usize> {
+    key_led_slots(variant, code).first().copied()
 }
 
 /// Generates the standard 82-key + knob layout of the Kreo Hive 75%.
@@ -439,6 +592,46 @@ mod tests {
             Rgb::new(255, 0, 128)
         );
         assert_eq!(model.keys.len(), 67);
+    }
+
+    #[test]
+    fn unpainted_keys_use_fallback_color() {
+        let mut model = KeyboardModel::new();
+        model.select_wasd();
+        model.apply_color_to_selection(Rgb::new(255, 0, 0));
+        let base = Rgb::new(0, 0, 255);
+        let buf = model.build_led_buffer(base);
+        let w = key_code_to_led_index(model.variant, "W").unwrap() * 3;
+        let q = key_code_to_led_index(model.variant, "Q").unwrap() * 3;
+        assert_eq!(&buf[w..w + 3], &[255, 0, 0]);
+        assert_eq!(&buf[q..q + 3], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn hive75_map_matches_probed_hardware() {
+        let v = KeyboardVariant::Hive75;
+        // Verified by lighting single slots on a real Hive 75
+        assert_eq!(key_code_to_led_index(v, "Grave"), Some(1));
+        assert_eq!(key_code_to_led_index(v, "Q"), Some(10));
+        assert_eq!(key_code_to_led_index(v, "F10"), Some(80));
+        assert_eq!(key_code_to_led_index(v, "Ins"), Some(114));
+        assert_eq!(key_code_to_led_index(v, "PgUp"), Some(123));
+        assert_eq!(key_code_to_led_index(v, "RCtrl"), Some(101));
+        assert_eq!(key_led_slots(v, "Space").len(), 6);
+
+        // Every key except the knob has a unique LED slot
+        let model = KeyboardModel::with_variant(v);
+        let mut seen = std::collections::HashSet::new();
+        for k in model.keys.iter().filter(|k| k.code != "Knob") {
+            for &s in key_led_slots(v, k.code) {
+                assert!(seen.insert(s), "slot {s} reused by {}", k.code);
+            }
+            assert!(
+                !key_led_slots(v, k.code).is_empty(),
+                "{} has no LED",
+                k.code
+            );
+        }
     }
 
     #[test]
