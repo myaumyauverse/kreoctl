@@ -102,6 +102,7 @@ fn test_config_serialization_roundtrip() {
         mode: Some(LightingMode::Wave),
         brightness: Some(4),
         speed: Some(5),
+        ..Default::default()
     };
 
     let serialized = toml::to_string(&s).expect("serializing settings should succeed");

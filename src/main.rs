@@ -20,17 +20,21 @@ struct Args {
     /// Named preset or hexadecimal RGB color, e.g. red or '#00ff88'.
     color: Option<String>,
 
-    /// Lighting mode (static, breathing, cycle, wave, reactive, off).
+    /// Lighting effect, e.g. normal, breath, spectrum, wave, corrugated or off.
     #[arg(short, long, value_enum)]
     mode: Option<LightingMode>,
 
-    /// Brightness level from 1 (dimmest) to 5 (maximum).
-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=5))]
+    /// Brightness level from 0 (off) to 4 (maximum).
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=4))]
     brightness: Option<u8>,
 
     /// Animation speed level from 1 (slowest) to 5 (fastest).
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=5))]
     speed: Option<u8>,
+
+    /// Effect direction for wave-style modes.
+    #[arg(short, long, value_parser = ["rtl", "ltr"])]
+    direction: Option<String>,
 
     /// Stream dynamic software lighting animation in the terminal until Ctrl+C.
     #[arg(long)]
@@ -55,9 +59,33 @@ struct Args {
     /// Remove this application from XDG autostart.
     #[arg(long)]
     disable_autostart: bool,
+
+    /// Target keyboard model (75 or 65). Auto-detected if omitted.
+    #[arg(long, value_parser = ["75", "65"])]
+    model: Option<String>,
+}
+
+#[inline]
+fn tune_memory_allocator() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        unsafe extern "C" {
+            fn mallopt(
+                param: std::os::raw::c_int,
+                value: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        // Limit max arenas to 2 to prevent excessive per-thread virtual/resident memory
+        mallopt(-8, 2);
+        // Trim threshold: 64 KB (default is up to 32MB)
+        mallopt(-1, 64 * 1024);
+        // Mmap threshold: 128 KB
+        mallopt(-3, 128 * 1024);
+    }
 }
 
 fn main() -> ExitCode {
+    tune_memory_allocator();
     let args = Args::parse();
 
     let result = run_command(args);
@@ -69,7 +97,10 @@ fn main() -> ExitCode {
             if let KreoError::PermissionDenied(_) = &error {
                 eprintln!("\nTip: To control lighting without sudo, add the udev rule:");
                 eprintln!(
-                    "  echo 'KERNEL==\"hidraw*\", ATTRS{{idVendor}}==\"320f\", ATTRS{{idProduct}}==\"5055\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-kreo-hive.rules"
+                    "  echo 'KERNEL==\"hidraw*\", ATTRS{{idVendor}}==\"320f\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-kreo-hive.rules"
+                );
+                eprintln!(
+                    "  echo 'KERNEL==\"hidraw*\", ATTRS{{idVendor}}==\"258a\", ATTRS{{idProduct}}==\"010c\", TAG+=\"uaccess\"' | sudo tee -a /etc/udev/rules.d/60-kreo-hive.rules"
                 );
                 eprintln!("  sudo udevadm control --reload-rules && sudo udevadm trigger");
                 eprintln!("Then unplug and replug the keyboard.");
@@ -133,15 +164,24 @@ fn run_command(args: Args) -> Result<(), KreoError> {
     } else if args.mode.is_some()
         || args.brightness.is_some()
         || args.speed.is_some()
+        || args.direction.is_some()
         || args.color.is_some()
     {
         let mut cfg = config::load_last_lighting().unwrap_or_default();
 
-        if let Some(c) = args.color {
-            cfg.color = parse_color(&c)?;
+        let has_explicit_color = args.color.is_some();
+        if let Some(ref c) = args.color {
+            cfg.color = parse_color(c)?;
+            cfg.multicolor = false;
+            if args.mode.is_none() {
+                cfg.mode = LightingMode::Static;
+            }
         }
         if let Some(m) = args.mode {
             cfg.mode = m;
+            if m.is_inherently_multicolor() && !has_explicit_color {
+                cfg.multicolor = true;
+            }
         }
         if let Some(b) = args.brightness {
             cfg.brightness = b;
@@ -149,11 +189,19 @@ fn run_command(args: Args) -> Result<(), KreoError> {
         if let Some(s) = args.speed {
             cfg.speed = s;
         }
+        if let Some(d) = args.direction.as_deref() {
+            cfg.direction = u8::from(d == "ltr");
+        }
 
         device::set_lighting(&cfg)?;
         config::save_last_lighting(&cfg)?;
+        let model_msg = if let Some(d) = device::detect_connected_device() {
+            format!(" on {}", d.variant.name())
+        } else {
+            String::new()
+        };
         println!(
-            "Applied {} (Mode: {}, Brightness: {}, Speed: {})",
+            "Applied {}{model_msg} (Mode: {}, Brightness: {}, Speed: {})",
             cfg.color.hex(),
             cfg.mode.name(),
             cfg.brightness,
