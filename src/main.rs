@@ -48,6 +48,14 @@ struct Args {
     #[arg(long)]
     restore: bool,
 
+    /// Read and print the lighting state currently stored on the keyboard.
+    #[arg(long)]
+    status: bool,
+
+    /// Light a single LED slot (0-127) white and all others off, to verify the per-key map.
+    #[arg(long, value_name = "INDEX", value_parser = clap::value_parser!(u16).range(0..128))]
+    probe_led: Option<u16>,
+
     /// List built-in color presets.
     #[arg(long)]
     list_presets: bool,
@@ -127,6 +135,32 @@ fn run_command(args: Args) -> Result<(), KreoError> {
         {
             Err(KreoError::GuiNotCompiled)
         }
+    } else if args.status {
+        let cfg = device::read_current_lighting()?;
+        let color = if cfg.multicolor {
+            "rainbow".to_string()
+        } else {
+            cfg.color.hex()
+        };
+        println!(
+            "Mode: {}\nColor: {color}\nBrightness: {}/4\nSpeed: {}/5\nDirection: {}",
+            cfg.mode.name(),
+            cfg.brightness,
+            cfg.speed,
+            if cfg.direction == 0 {
+                "right to left"
+            } else {
+                "left to right"
+            }
+        );
+        Ok(())
+    } else if let Some(index) = args.probe_led {
+        let mut buf = [0_u8; kreoctl::protocol::TOTAL_COLOR_BYTES];
+        let i = index as usize * 3;
+        buf[i..i + 3].copy_from_slice(&[255, 255, 255]);
+        device::set_per_key_colors(&buf, kreoctl::protocol::BRIGHTNESS_MAX)?;
+        println!("Lit LED slot {index}. Run `kreoctl --restore` to return to your saved lighting.");
+        Ok(())
     } else if args.restore {
         let cfg = config::load_last_lighting()?;
         device::set_lighting(&cfg)?;
