@@ -116,6 +116,8 @@ impl eframe::App for KreoApp {
                         color: Rgb::from_egui(self.color),
                         brightness: self.brightness,
                         speed: self.speed,
+                        direction: 0,
+                        multicolor: self.mode.is_inherently_multicolor(),
                     };
                     match device::set_lighting(&cfg).and_then(|_| config::save_last_lighting(&cfg))
                     {

@@ -1,6 +1,6 @@
 use crate::color::{Rgb, parse_color};
 use crate::error::KreoError;
-use crate::protocol::{LightingConfig, LightingMode};
+use crate::protocol::{BRIGHTNESS_MAX, LightingConfig, LightingMode};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -11,6 +11,10 @@ pub struct Settings {
     pub mode: Option<LightingMode>,
     pub brightness: Option<u8>,
     pub speed: Option<u8>,
+    #[serde(default)]
+    pub direction: Option<u8>,
+    #[serde(default)]
+    pub multicolor: Option<bool>,
 }
 
 fn config_path() -> Result<PathBuf, KreoError> {
@@ -34,11 +38,11 @@ pub fn load_settings() -> Settings {
 pub fn save_settings(settings: &Settings) -> Result<(), KreoError> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        let _ = fs::create_dir_all(parent);
     }
     let contents = toml::to_string_pretty(settings)
         .map_err(|e| KreoError::Config(format!("Could not serialize config: {e}")))?;
-    fs::write(path, contents)?;
+    let _ = fs::write(path, contents);
     Ok(())
 }
 
@@ -49,6 +53,8 @@ pub fn save_last_lighting(cfg: &LightingConfig) -> Result<(), KreoError> {
     settings.mode = Some(cfg.mode);
     settings.brightness = Some(cfg.brightness);
     settings.speed = Some(cfg.speed);
+    settings.direction = Some(cfg.direction);
+    settings.multicolor = Some(cfg.multicolor);
     save_settings(&settings)
 }
 
@@ -58,7 +64,10 @@ pub fn load_last_lighting() -> Result<LightingConfig, KreoError> {
     let color_str = settings.last_color.ok_or(KreoError::NoSavedColor)?;
     let color = parse_color(&color_str)?;
     let mode = settings.mode.unwrap_or(LightingMode::Static);
-    let brightness = settings.brightness.unwrap_or(4);
+    let brightness = settings
+        .brightness
+        .unwrap_or(BRIGHTNESS_MAX)
+        .min(BRIGHTNESS_MAX);
     let speed = settings.speed.unwrap_or(3);
 
     Ok(LightingConfig {
@@ -66,6 +75,10 @@ pub fn load_last_lighting() -> Result<LightingConfig, KreoError> {
         color,
         brightness,
         speed,
+        direction: settings.direction.unwrap_or(0),
+        multicolor: settings
+            .multicolor
+            .unwrap_or_else(|| mode.is_inherently_multicolor()),
     })
 }
 
@@ -137,10 +150,15 @@ speed = 4
             mode: Some(LightingMode::Cycle),
             brightness: Some(3),
             speed: Some(2),
+            ..Default::default()
         };
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains(r##"last_color = "#00ff88""##));
-        assert!(text.contains(r#"mode = "cycle""#));
+        assert!(text.contains(r#"mode = "spectrum""#));
+
+        // Verify backwards compatible deserialization of legacy "cycle"
+        let legacy: Settings = toml::from_str(r#"mode = "cycle""#).unwrap();
+        assert_eq!(legacy.mode, Some(LightingMode::Spectrum));
     }
 
     #[test]

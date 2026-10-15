@@ -77,7 +77,7 @@ fn test_cli_rejects_out_of_range_brightness() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not in 1..=5"));
+    assert!(stderr.contains("not in 0..=4"));
 }
 
 #[test]

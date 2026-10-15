@@ -20,6 +20,9 @@ pub enum KreoError {
     #[error("HID communication failed: {0}")]
     Hid(String),
 
+    #[error("Keyboard protocol error: {0}")]
+    Protocol(String),
+
     #[error("Short HID write: sent {sent} of {expected} bytes")]
     ShortWrite { sent: usize, expected: usize },
 
