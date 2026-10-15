@@ -1,9 +1,13 @@
 use kreoctl::{
-    MockBackend, Rgb, device,
+    MockBackend, Rgb,
+    animation::stream_animation,
+    device,
     error::KreoError,
     parse_color,
-    protocol::{CMD_WRITE_CONFIG, MODE_BYTE_NORMAL, REPORT_ID, REPORT_LEN},
+    protocol::{self, CMD_WRITE_CONFIG, LightingMode, MODE_BYTE_NORMAL, REPORT_ID, REPORT_LEN},
 };
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[test]
 fn test_library_color_parsing_and_report_generation() {
@@ -32,4 +36,23 @@ fn test_library_error_matching() {
         }
         other => panic!("expected KreoError::InvalidColor, got {other:?}"),
     }
+}
+
+#[test]
+fn test_streaming_animation_into_mock_backend() {
+    let mut mock = MockBackend::new();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    stream_animation(
+        &mut mock,
+        LightingMode::Breathing,
+        Rgb::new(0, 0, 255),
+        5,
+        stop_signal,
+        Some(15),
+    )
+    .expect("streaming should succeed");
+
+    let per_frame = protocol::TOTAL_COLOR_BYTES.div_ceil(protocol::MAX_PAYLOAD);
+    assert_eq!(mock.report_count(), 1 + 15 * per_frame + 1);
 }

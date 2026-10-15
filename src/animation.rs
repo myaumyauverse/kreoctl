@@ -2,7 +2,7 @@ use crate::backend::DeviceBackend;
 use crate::color::Rgb;
 use crate::device;
 use crate::error::KreoError;
-use crate::protocol::{LightingConfig, LightingMode};
+use crate::protocol::LightingMode;
 use std::f32::consts::PI;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,7 +58,8 @@ pub fn speed_to_delay(speed: u8) -> Duration {
 
 /// Streams software animation frames to the provided DeviceBackend until stopped.
 ///
-/// Each frame is written as a Normal-mode color into the active profile.
+/// Frames are sent with the firmware's direct-color command, so the onboard
+/// effect resumes as soon as streaming ends.
 pub fn stream_animation<B: DeviceBackend>(
     backend: &mut B,
     mode: LightingMode,
@@ -68,12 +69,14 @@ pub fn stream_animation<B: DeviceBackend>(
     max_frames: Option<usize>,
 ) -> Result<(), KreoError> {
     let delay = speed_to_delay(speed);
+    let led_slots = device::read_led_map_size(backend);
+    let mut frame = vec![0_u8; led_slots * 3];
     let mut step: usize = 0;
     let total_cycle_steps = 100;
 
-    while !stop_signal.load(Ordering::Relaxed) {
-        if max_frames.is_some_and(|limit| step >= limit) {
-            break;
+    let result = loop {
+        if stop_signal.load(Ordering::Relaxed) || max_frames.is_some_and(|limit| step >= limit) {
+            break Ok(());
         }
 
         let progress = (step % total_cycle_steps) as f32 / total_cycle_steps as f32;
@@ -88,14 +91,20 @@ pub fn stream_animation<B: DeviceBackend>(
             LightingMode::Off => Rgb::new(0, 0, 0),
             _ => base_color,
         };
+        for led in frame.as_chunks_mut::<3>().0 {
+            *led = [color.r, color.g, color.b];
+        }
 
-        device::set_lighting_with_backend(backend, &LightingConfig::new_static(color))?;
+        if let Err(e) = device::send_direct_frame(backend, &frame) {
+            break Err(e);
+        }
 
         step += 1;
         sleep(delay);
-    }
+    };
 
-    Ok(())
+    let ended = device::end_direct_mode(backend);
+    result.and(ended)
 }
 
 #[cfg(test)]
@@ -142,7 +151,12 @@ mod tests {
         )
         .unwrap();
 
-        // begin + profile read + block write + end per frame
-        assert_eq!(mock.report_count(), 10 * 4);
+        // capabilities query + 7 chunks per frame + end-of-direct-mode
+        let per_frame = crate::protocol::TOTAL_COLOR_BYTES.div_ceil(crate::protocol::MAX_PAYLOAD);
+        assert_eq!(mock.report_count(), 1 + 10 * per_frame + 1);
+        assert_eq!(
+            mock.last_report().unwrap()[3],
+            crate::protocol::CMD_END_DYNAMIC_COLORS
+        );
     }
 }

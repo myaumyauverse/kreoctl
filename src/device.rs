@@ -231,6 +231,23 @@ pub fn set_per_key_colors_with_backend(
     set_lighting_with_backend(backend, &cfg)
 }
 
+/// Streams one frame of software-controlled colors (direct mode).
+pub fn send_direct_frame(
+    backend: &mut dyn DeviceBackend,
+    color_buffer: &[u8],
+) -> Result<(), KreoError> {
+    write_chunked(backend, protocol::CMD_SEND_DYNAMIC_COLORS, 0, color_buffer)
+}
+
+/// Leaves direct mode and returns control to the onboard effect.
+pub fn end_direct_mode(backend: &mut dyn DeviceBackend) -> Result<(), KreoError> {
+    query(
+        backend,
+        &protocol::build_query(protocol::CMD_END_DYNAMIC_COLORS, 0, 0, &[]),
+    )
+    .map(|_| ())
+}
+
 /// Query the keyboard directly for its current onboard lighting state.
 pub fn read_current_lighting() -> Result<LightingConfig, KreoError> {
     let mut backend = open_device()?;
