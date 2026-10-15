@@ -1,19 +1,93 @@
 use crate::backend::{DeviceBackend, HidBackend};
 use crate::color::Rgb;
 use crate::error::KreoError;
+use crate::keyboard::KeyboardVariant;
 use crate::protocol::{self, LightingConfig, LightingMode, MAX_PAYLOAD, REPORT_LEN};
 use hidapi::HidApi;
 
-pub const VENDOR_ID: u16 = 0x320f;
-pub const PRODUCT_ID: u16 = 0x5055;
+// Supported Hardware IDs
+pub const VENDOR_ID_EVISION: u16 = 0x320f;
+pub const PRODUCT_ID_HIVE75: u16 = 0x5055;
+pub const PRODUCT_ID_HIVE65: u16 = 0x5064;
+
+pub const VENDOR_ID_BYTECH: u16 = 0x258a;
+pub const PRODUCT_ID_BYTECH: u16 = 0x010c;
+
+// Legacy constants for backwards compatibility
+pub const VENDOR_ID: u16 = VENDOR_ID_EVISION;
+pub const PRODUCT_ID: u16 = PRODUCT_ID_HIVE75;
 pub const RGB_INTERFACE: i32 = 1; // USB interface 1 -> hidraw vendor lighting channel
 
-/// Discover and open the keyboard's vendor lighting interface (Usage Page 0xFF1C).
-pub fn open_device() -> Result<HidBackend, KreoError> {
+/// Information about a detected Kreo keyboard device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectedDeviceInfo {
+    pub variant: KeyboardVariant,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub product_name: String,
+}
+
+/// Query connected USB HID devices and determine if a Hive 75 or Hive 65 is present.
+pub fn detect_connected_device() -> Option<ConnectedDeviceInfo> {
+    let api = HidApi::new().ok()?;
+    for info in api.device_list() {
+        let vid = info.vendor_id();
+        let pid = info.product_id();
+        let prod_str = info.product_string().unwrap_or("").to_lowercase();
+
+        // 1. Bytech OEM Kreo devices (VID 0x258a, PID 0x010c)
+        if vid == VENDOR_ID_BYTECH && pid == PRODUCT_ID_BYTECH {
+            let variant = if prod_str.contains("65") {
+                KeyboardVariant::Hive65
+            } else {
+                KeyboardVariant::Hive75
+            };
+            let name = info
+                .product_string()
+                .map(String::from)
+                .unwrap_or_else(|| variant.name().to_string());
+            return Some(ConnectedDeviceInfo {
+                variant,
+                vendor_id: vid,
+                product_id: pid,
+                product_name: name,
+            });
+        }
+
+        // 2. Evision / Sonix OEM Kreo devices (VID 0x320f)
+        if vid == VENDOR_ID_EVISION && (pid == PRODUCT_ID_HIVE75 || pid == PRODUCT_ID_HIVE65) {
+            let variant = if pid == PRODUCT_ID_HIVE65 || prod_str.contains("65") {
+                KeyboardVariant::Hive65
+            } else {
+                KeyboardVariant::Hive75
+            };
+            let name = info
+                .product_string()
+                .map(String::from)
+                .unwrap_or_else(|| variant.name().to_string());
+            return Some(ConnectedDeviceInfo {
+                variant,
+                vendor_id: vid,
+                product_id: pid,
+                product_name: name,
+            });
+        }
+    }
+    None
+}
+
+/// Discovers and opens the keyboard's vendor lighting interface, returning backend and detected info.
+pub fn open_device_with_info() -> Result<(HidBackend, ConnectedDeviceInfo), KreoError> {
     let api = HidApi::new().map_err(|e| KreoError::Hid(e.to_string()))?;
+
     let candidates: Vec<_> = api
         .device_list()
-        .filter(|info| info.vendor_id() == VENDOR_ID && info.product_id() == PRODUCT_ID)
+        .filter(|info| {
+            let vid = info.vendor_id();
+            let pid = info.product_id();
+            (vid == VENDOR_ID_EVISION && (pid == PRODUCT_ID_HIVE75 || pid == PRODUCT_ID_HIVE65))
+                || (vid == VENDOR_ID_BYTECH && pid == PRODUCT_ID_BYTECH)
+        })
         .collect();
 
     if candidates.is_empty() {
@@ -28,9 +102,24 @@ pub fn open_device() -> Result<HidBackend, KreoError> {
                 .iter()
                 .find(|info| info.interface_number() == RGB_INTERFACE)
         })
+        .or_else(|| candidates.iter().find(|info| info.interface_number() > 0))
+        .or_else(|| candidates.first())
         .ok_or(KreoError::InterfaceNotFound {
             interface: RGB_INTERFACE,
         })?;
+
+    let vid = info.vendor_id();
+    let pid = info.product_id();
+    let prod_str = info.product_string().unwrap_or("").to_lowercase();
+    let variant = if prod_str.contains("65") || pid == PRODUCT_ID_HIVE65 {
+        KeyboardVariant::Hive65
+    } else {
+        KeyboardVariant::Hive75
+    };
+    let name = info
+        .product_string()
+        .map(String::from)
+        .unwrap_or_else(|| variant.name().to_string());
 
     let device = api.open_path(info.path()).map_err(|e| {
         let err_msg = e.to_string();
@@ -43,7 +132,20 @@ pub fn open_device() -> Result<HidBackend, KreoError> {
         }
     })?;
 
-    Ok(HidBackend::new(device))
+    Ok((
+        HidBackend::new(device),
+        ConnectedDeviceInfo {
+            variant,
+            vendor_id: vid,
+            product_id: pid,
+            product_name: name,
+        },
+    ))
+}
+
+/// Discover and open the keyboard's vendor lighting interface.
+pub fn open_device() -> Result<HidBackend, KreoError> {
+    open_device_with_info().map(|(backend, _)| backend)
 }
 
 /// Sends one request and waits for the matching reply, returning its payload.
