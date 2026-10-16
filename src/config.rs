@@ -1,5 +1,6 @@
 use crate::color::{Rgb, parse_color};
 use crate::error::KreoError;
+use crate::profile::ProfileStore;
 use crate::protocol::{BRIGHTNESS_MAX, LightingConfig, LightingMode};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ pub struct Settings {
     pub direction: Option<u8>,
     #[serde(default)]
     pub multicolor: Option<bool>,
+    pub profile_store: Option<ProfileStore>,
 }
 
 fn config_path() -> Result<PathBuf, KreoError> {
@@ -91,6 +93,19 @@ pub fn save_last_color(color: Rgb) -> Result<(), KreoError> {
 pub fn load_last_color() -> Result<Rgb, KreoError> {
     let cfg = load_last_lighting()?;
     Ok(cfg.color)
+}
+
+/// Saves the user's profiles into persistent configuration.
+pub fn save_profile_store(store: &ProfileStore) -> Result<(), KreoError> {
+    let mut settings = load_settings();
+    settings.profile_store = Some(store.clone());
+    save_settings(&settings)
+}
+
+/// Loads the user's profiles from persistent configuration.
+pub fn load_profile_store() -> ProfileStore {
+    let settings = load_settings();
+    settings.profile_store.unwrap_or_default()
 }
 
 /// Enables or disables restoring lighting automatically on desktop login via XDG Autostart.
