@@ -1,7 +1,9 @@
-//! Background device worker that applies lighting changes off the UI thread.
+//! Background device worker that keeps the keyboard and the app in sync.
 //!
-//! The worker owns a single HID handle and coalesces bursts of changes, such
-//! as slider drags, into one write.
+//! The worker owns a single HID handle, applies lighting changes off the UI
+//! thread (coalescing bursts such as slider drags into one write), and polls
+//! the keyboard so changes made with on-board shortcuts like Fn+Ins are
+//! reported back to the app.
 
 use crate::backend::HidBackend;
 use crate::device::{self, ConnectedDeviceInfo};
@@ -10,6 +12,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// How often the keyboard is polled for changes made on the device itself.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// How often a missing keyboard is looked for again.
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -24,12 +28,15 @@ pub enum Command {
         colors: Vec<u8>,
         brightness: u8,
     },
+    /// Re-read the keyboard state immediately.
+    Refresh,
 }
 
 impl Command {
-    fn seq(&self) -> u64 {
+    fn seq(&self) -> Option<u64> {
         match self {
-            Self::Apply { seq, .. } | Self::ApplyPerKey { seq, .. } => *seq,
+            Self::Apply { seq, .. } | Self::ApplyPerKey { seq, .. } => Some(*seq),
+            Self::Refresh => None,
         }
     }
 }
@@ -42,6 +49,12 @@ pub enum Event {
     /// A command finished; `config` is the state read back from the keyboard.
     Applied {
         seq: u64,
+        config: LightingConfig,
+    },
+    /// The keyboard state differs from what the app last saw (e.g. Fn+Ins).
+    /// `after_seq` is the last command the worker had applied when it read this.
+    HardwareState {
+        after_seq: u64,
         config: LightingConfig,
     },
     Error(String),
@@ -81,6 +94,8 @@ struct Worker<W: Fn()> {
     events: Sender<Event>,
     wake: W,
     backend: Option<HidBackend>,
+    last_seen: Option<LightingConfig>,
+    applied_seq: u64,
     reported_missing: bool,
 }
 
@@ -90,6 +105,8 @@ impl<W: Fn()> Worker<W> {
             events,
             wake,
             backend: None,
+            last_seen: None,
+            applied_seq: 0,
             reported_missing: false,
         }
     }
@@ -107,16 +124,35 @@ impl<W: Fn()> Worker<W> {
                 next_connect = Instant::now() + RECONNECT_INTERVAL;
             }
 
-            match commands.recv_timeout(RECONNECT_INTERVAL) {
+            let timeout = if self.backend.is_some() {
+                POLL_INTERVAL
+            } else {
+                next_connect.saturating_duration_since(Instant::now())
+            };
+
+            match commands.recv_timeout(timeout) {
                 Ok(first) => {
                     // Collapse everything queued behind it: only the newest state matters.
                     let mut latest = first;
+                    let mut refresh = false;
                     while let Ok(next) = commands.try_recv() {
-                        latest = next;
+                        match next {
+                            Command::Refresh => refresh = true,
+                            other => latest = other,
+                        }
                     }
-                    self.execute(latest);
+                    if matches!(latest, Command::Refresh) {
+                        refresh = true;
+                    }
+                    if latest.seq().is_some() {
+                        self.execute(latest);
+                    }
+                    if refresh {
+                        self.last_seen = None;
+                        self.poll();
+                    }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => self.poll(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -129,8 +165,10 @@ impl<W: Fn()> Worker<W> {
         match device::open_device_with_info() {
             Ok((backend, info)) => {
                 self.backend = Some(backend);
+                self.last_seen = None;
                 self.reported_missing = false;
                 self.emit(Event::Connected(info));
+                self.poll();
             }
             Err(e) => {
                 if !self.reported_missing {
@@ -143,13 +181,15 @@ impl<W: Fn()> Worker<W> {
 
     fn drop_backend(&mut self, reason: String) {
         self.backend = None;
+        self.last_seen = None;
         self.reported_missing = true;
         self.emit(Event::Disconnected(reason));
     }
 
     fn execute(&mut self, command: Command) {
-        let seq = command.seq();
+        let seq = command.seq().unwrap_or(self.applied_seq);
         let Some(backend) = self.backend.as_mut() else {
+            self.applied_seq = seq;
             self.emit(Event::Error("Keyboard not connected".into()));
             return;
         };
@@ -159,7 +199,9 @@ impl<W: Fn()> Worker<W> {
             Command::ApplyPerKey {
                 colors, brightness, ..
             } => device::set_per_key_colors_with_backend(backend, colors, *brightness),
+            Command::Refresh => Ok(()),
         };
+        self.applied_seq = seq;
 
         if let Err(e) = result {
             self.drop_backend(format!("Write failed: {e}"));
@@ -167,8 +209,29 @@ impl<W: Fn()> Worker<W> {
         }
 
         match device::read_current_lighting_with_backend(backend) {
-            Ok(config) => self.emit(Event::Applied { seq, config }),
+            Ok(config) => {
+                self.last_seen = Some(config);
+                self.emit(Event::Applied { seq, config });
+            }
             Err(e) => self.drop_backend(format!("Read-back failed: {e}")),
+        }
+    }
+
+    fn poll(&mut self) {
+        let Some(backend) = self.backend.as_mut() else {
+            return;
+        };
+        match device::read_current_lighting_with_backend(backend) {
+            Ok(config) => {
+                if self.last_seen != Some(config) {
+                    self.last_seen = Some(config);
+                    self.emit(Event::HardwareState {
+                        after_seq: self.applied_seq,
+                        config,
+                    });
+                }
+            }
+            Err(e) => self.drop_backend(format!("Lost connection: {e}")),
         }
     }
 }
