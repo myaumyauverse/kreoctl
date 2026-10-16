@@ -1,7 +1,7 @@
 use crate::error::KreoError;
 
 /// An 8-bit per channel RGB color.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,

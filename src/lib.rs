@@ -5,6 +5,7 @@ pub mod config;
 pub mod device;
 pub mod error;
 pub mod keyboard;
+pub mod profile;
 pub mod protocol;
 
 #[cfg(feature = "gui")]
@@ -14,4 +15,5 @@ pub use backend::{DeviceBackend, HidBackend, MockBackend};
 pub use color::{PRESETS, Rgb, parse_color};
 pub use error::KreoError;
 pub use keyboard::{KeyDefinition, KeyboardModel, KeyboardVariant};
+pub use profile::{Profile, ProfileStore};
 pub use protocol::{LightingConfig, LightingMode};
