@@ -5,6 +5,7 @@ pub mod config;
 pub mod device;
 pub mod error;
 pub mod keyboard;
+pub mod preview;
 pub mod profile;
 pub mod protocol;
 pub mod sync;
