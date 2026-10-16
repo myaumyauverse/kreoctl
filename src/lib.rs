@@ -7,6 +7,7 @@ pub mod error;
 pub mod keyboard;
 pub mod profile;
 pub mod protocol;
+pub mod sync;
 
 #[cfg(feature = "gui")]
 pub mod gui;
