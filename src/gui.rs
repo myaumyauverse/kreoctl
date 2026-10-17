@@ -302,6 +302,12 @@ impl KreoApp {
         self.g_val = color.g;
         self.b_val = color.b;
 
+        if !self.keyboard.selected_keys.is_empty() {
+            self.keyboard.apply_color_to_selection(color);
+            self.apply_per_key_to_hardware();
+            return;
+        }
+
         let prof = self.profile_store.active_profile_mut();
         prof.color = color;
         if prof.mode == LightingMode::Custom {
@@ -839,11 +845,16 @@ impl KreoApp {
         ui.add_space(12.0);
 
         // 2. KEYBOARD VISUALIZER (75% or 65%)
-        render_keyboard(ui, &self.keyboard, &cfg, container_w);
+        render_keyboard(ui, &mut self.keyboard, &cfg, container_w);
 
         ui.add_space(14.0);
 
-        // 3. Control panel
+        // 3. Per-key selection toolbar
+        self.render_selection_toolbar(ui);
+
+        ui.add_space(14.0);
+
+        // 4. Control panel
         egui::Frame::new()
             .fill(KREO_PANEL_BG)
             .stroke(Stroke::new(1.0_f32, KREO_BORDER))
@@ -875,6 +886,105 @@ impl KreoApp {
                     .color(KREO_TEXT_MUTED)
                     .size(11.5),
             );
+        });
+    }
+
+    fn render_selection_toolbar(&mut self, ui: &mut egui::Ui) {
+        if !self.keyboard.variant.is_verified() {
+            ui.label(
+                egui::RichText::new(
+                    "Hive 65 support is experimental: effects should work, but per-key colours may land on the wrong keys.",
+                )
+                .color(Color32::from_rgb(251, 191, 36))
+                .size(11.5),
+            );
+            ui.add_space(4.0);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+            ui.label(
+                egui::RichText::new("Per-key:")
+                    .color(KREO_TEXT_MUTED)
+                    .size(12.0)
+                    .strong(),
+            );
+            let tools: &[(&str, usize)] = match self.keyboard.variant {
+                KeyboardVariant::Hive75 => &[
+                    ("All Keys", 0),
+                    ("WASD", 1),
+                    ("Arrows", 2),
+                    ("F-Row", 3),
+                    ("Letters", 4),
+                ],
+                KeyboardVariant::Hive65 => &[
+                    ("All Keys", 0),
+                    ("WASD", 1),
+                    ("Arrows", 2),
+                    ("Numbers", 6),
+                    ("Letters", 4),
+                ],
+            };
+            for &(name, id) in tools {
+                if ui.add(chip_button(name, false)).clicked() {
+                    match id {
+                        0 => self.keyboard.select_all(),
+                        1 => self.keyboard.select_wasd(),
+                        2 => self.keyboard.select_arrows(),
+                        3 => self.keyboard.select_f_keys(),
+                        4 => self.keyboard.select_letters(),
+                        6 => self.keyboard.select_numbers(),
+                        _ => {}
+                    }
+                }
+            }
+
+            let count = self.keyboard.selected_keys.len();
+            if count > 0 {
+                if ui.add(chip_button("Clear Selection", false)).clicked() {
+                    self.keyboard.clear_selection();
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("{count} selected - pick a color to paint"))
+                        .color(Color32::from_rgb(170, 150, 255))
+                        .size(12.0)
+                        .strong(),
+                );
+                let swatch = self.current_color();
+                let apply_btn = egui::Button::new(
+                    egui::RichText::new(format!("Paint {}", swatch.hex()))
+                        .color(Color32::WHITE)
+                        .size(11.5)
+                        .strong(),
+                )
+                .fill(KREO_PURPLE_ACTIVE)
+                .corner_radius(CornerRadius::same(5))
+                .min_size(Vec2::new(0.0, 24.0));
+                if ui.add(apply_btn).clicked() {
+                    self.set_color(swatch);
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("Click keys or use a quick select, then pick a color")
+                        .color(KREO_TEXT_MUTED)
+                        .size(11.0),
+                );
+            }
+
+            if !self.keyboard.per_key_colors.is_empty()
+                && ui
+                    .add(chip_button("Reset Key Colors", false))
+                    .on_hover_text("Remove all per-key colors (keys follow the effect color)")
+                    .clicked()
+            {
+                self.keyboard.clear_key_colors();
+                self.sync_key_colors_to_profile();
+                if self.profile_store.active_profile().mode == LightingMode::Custom {
+                    self.apply_per_key_to_hardware();
+                } else {
+                    self.persist();
+                }
+            }
         });
     }
 
@@ -1406,7 +1516,7 @@ fn render_kreo_logo(ui: &mut egui::Ui, variant: KeyboardVariant) {
 #[cfg(feature = "gui")]
 fn render_keyboard(
     ui: &mut egui::Ui,
-    keyboard: &KeyboardModel,
+    keyboard: &mut KeyboardModel,
     cfg: &LightingConfig,
     board_w: f32,
 ) {
@@ -1479,6 +1589,7 @@ fn render_keyboard(
     let b_factor = cfg.brightness.min(BRIGHTNESS_MAX) as f32 / BRIGHTNESS_MAX as f32;
 
     // Pass 2: paint
+    let mut clicked_code: Option<&'static str> = None;
     for (key_def, &key_rect) in keyboard.keys.iter().zip(&rects) {
         if key_def.code == "Knob" {
             // Draw CNC Rotary Knob
@@ -1515,6 +1626,8 @@ fn render_keyboard(
         let final_g = (key_rgb.g as f32 * b_factor).round() as u8;
         let final_b = (key_rgb.b as f32 * b_factor).round() as u8;
 
+        let is_selected = keyboard.is_selected(key_def.code);
+
         // Underglow light
         let glow_alpha = (b_factor * 110.0).round() as u8;
         ui.painter().rect_filled(
@@ -1526,12 +1639,20 @@ fn render_keyboard(
         // Keycap Body
         let shrink_amt = (u_size * 0.04).clamp(1.5, 3.0);
         let keycap_rect = key_rect.shrink(shrink_amt);
-        let keycap_bg = Color32::from_rgb(26, 28, 36);
+        let keycap_bg = if is_selected {
+            Color32::from_rgb(50, 40, 80)
+        } else {
+            Color32::from_rgb(26, 28, 36)
+        };
         ui.painter()
             .rect_filled(keycap_rect, CornerRadius::same(4), keycap_bg);
 
-        // Keycap Edge
-        let stroke = Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 56));
+        // Selection Stroke or Keycap Edge
+        let stroke = if is_selected {
+            Stroke::new(1.8_f32, KREO_PURPLE_ACTIVE)
+        } else {
+            Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 56))
+        };
         ui.painter().rect_stroke(
             keycap_rect,
             CornerRadius::same(4),
@@ -1549,6 +1670,16 @@ fn render_keyboard(
             egui::FontId::proportional(font_sz),
             text_color,
         );
+
+        // Interactivity: Click to toggle selection
+        let resp = ui.interact(key_rect, ui.id().with(key_def.id), Sense::click());
+        if resp.clicked() {
+            clicked_code = Some(key_def.code);
+        }
+    }
+
+    if let Some(code) = clicked_code {
+        keyboard.toggle_selection(code);
     }
 }
 
