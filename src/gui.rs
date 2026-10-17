@@ -11,6 +11,8 @@ use crate::{
 };
 #[cfg(feature = "gui")]
 use eframe::egui::{self, Color32, CornerRadius, Margin, Pos2, Rect, Sense, Stroke, Vec2};
+#[cfg(feature = "gui")]
+use std::time::Instant;
 
 // Official Kreo Dark & Purple Palette
 #[cfg(feature = "gui")]
@@ -160,6 +162,7 @@ struct KreoApp {
     // Device synchronisation
     worker: DeviceWorker,
     sent_seq: u64,
+    last_hw_change: Option<Instant>,
     sidebar_open: bool,
 }
 
@@ -202,6 +205,7 @@ impl KreoApp {
             frame_count: 0,
             worker,
             sent_seq: 0,
+            last_hw_change: None,
             sidebar_open: false,
         }
     }
@@ -342,10 +346,39 @@ impl KreoApp {
                         self.status_msg = format!("Applied {}", describe(&config));
                     }
                 }
-                Event::HardwareState { .. } => {}
+                Event::HardwareState { after_seq, config } => {
+                    // Ignore reads taken before our latest change reached the keyboard.
+                    if after_seq >= self.sent_seq {
+                        self.adopt_hardware_state(config);
+                    }
+                }
                 Event::Error(e) => self.status_msg = e,
             }
         }
+    }
+
+    /// Mirrors a state change made on the keyboard itself (Fn shortcuts) into the app.
+    fn adopt_hardware_state(&mut self, hw: LightingConfig) {
+        let prof = self.profile_store.active_profile_mut();
+        prof.mode = hw.mode;
+        if hw.mode != LightingMode::Off {
+            prof.brightness = hw.brightness;
+        }
+        prof.speed = hw.speed;
+        prof.direction = hw.direction;
+        prof.multicolor = hw.multicolor;
+        if hw.mode.has_color() {
+            prof.color = hw.color;
+            self.r_val = hw.color.r;
+            self.g_val = hw.color.g;
+            self.b_val = hw.color.b;
+        }
+        if hw.mode != LightingMode::Custom {
+            self.keyboard.clear_selection();
+        }
+        self.last_hw_change = Some(Instant::now());
+        self.status_msg = format!("Keyboard: {}", describe(&hw));
+        self.persist();
     }
 
     fn switch_profile(&mut self, index: usize) {
@@ -837,9 +870,12 @@ impl KreoApp {
     fn render_light_setting_view(&mut self, ui: &mut egui::Ui, container_w: f32) {
         let cfg = self.current_config();
 
-        // 1. Header
+        // 1. Header: logo + live device status
         ui.horizontal(|ui| {
             render_kreo_logo(ui, self.keyboard.variant);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.render_sync_badge(ui);
+            });
         });
 
         ui.add_space(12.0);
@@ -887,6 +923,50 @@ impl KreoApp {
                     .size(11.5),
             );
         });
+    }
+
+    fn render_sync_badge(&mut self, ui: &mut egui::Ui) {
+        let recently_changed = self
+            .last_hw_change
+            .is_some_and(|t| t.elapsed().as_secs_f32() < 3.0);
+        if recently_changed {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        let (text, text_color, border) = if !self.device_connected {
+            ("OFFLINE", KREO_TEXT_MUTED, KREO_BORDER)
+        } else if recently_changed {
+            ("UPDATED FROM KEYBOARD", KREO_TEXT_WHITE, KREO_PURPLE_ACTIVE)
+        } else {
+            ("SYNCED", KREO_PURPLE_SOFT, KREO_BORDER)
+        };
+
+        if ui
+            .add(chip_button("Re-read", false))
+            .on_hover_text("Read the current lighting from the keyboard now")
+            .clicked()
+        {
+            self.worker.send(Command::Refresh);
+        }
+        ui.add_space(4.0);
+        egui::Frame::new()
+            .fill(Color32::from_rgb(26, 28, 38))
+            .stroke(Stroke::new(1.0_f32, border))
+            .corner_radius(CornerRadius::same(5))
+            .inner_margin(Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(text)
+                        .color(text_color)
+                        .size(10.5)
+                        .strong(),
+                )
+                .on_hover_text(if self.device_connected {
+                    "Changes made on the keyboard (Fn+Ins, Fn+arrows) appear here automatically"
+                } else {
+                    "Keyboard not detected. Check the USB cable and udev rule."
+                });
+            });
     }
 
     fn render_selection_toolbar(&mut self, ui: &mut egui::Ui) {
