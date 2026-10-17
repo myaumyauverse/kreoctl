@@ -5,6 +5,7 @@ use crate::{
     config,
     error::KreoError,
     keyboard::{KeyboardModel, KeyboardVariant},
+    preview,
     profile::ProfileStore,
     protocol::{BRIGHTNESS_MAX, DirectionAxis, LightingConfig, LightingMode, SPEED_MAX, SPEED_MIN},
     sync::{Command, DeviceWorker, Event},
@@ -157,6 +158,7 @@ struct KreoApp {
     temp_profile_name: String,
     device_connected: bool,
     status_msg: String,
+    start_time: Instant,
     frame_count: u64,
 
     // Device synchronisation
@@ -164,6 +166,8 @@ struct KreoApp {
     sent_seq: u64,
     last_hw_change: Option<Instant>,
     sidebar_open: bool,
+    /// Recent physical key presses (while the window has focus), for reactive previews.
+    presses: Vec<(&'static str, Instant)>,
 }
 
 #[cfg(feature = "gui")]
@@ -202,11 +206,13 @@ impl KreoApp {
             temp_profile_name: active_prof.name.clone(),
             device_connected: false,
             status_msg: "Looking for keyboard…".into(),
+            start_time: Instant::now(),
             frame_count: 0,
             worker,
             sent_seq: 0,
             last_hw_change: None,
             sidebar_open: false,
+            presses: Vec::new(),
         }
     }
 
@@ -434,6 +440,30 @@ impl eframe::App for KreoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_count = self.frame_count.saturating_add(1);
         self.handle_device_events();
+
+        // Record key presses so reactive effects (Reaction, Ripples, Traverse) can mirror them
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                } = event
+                    && let Some(code) = egui_key_code(*key)
+                {
+                    self.presses.push((code, Instant::now()));
+                }
+            }
+        });
+        self.presses
+            .retain(|(_, at)| at.elapsed().as_secs_f32() < preview::PRESS_LIFETIME);
+
+        // Smooth 30 FPS repaint for on-screen GUI visualizer (no hardware USB streaming; MCU handles onboard routines)
+        let active_mode = self.profile_store.active_profile().mode;
+        if self.active_tab == SidebarTab::LightSetting && preview::is_animated(active_mode) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
 
         // Release free glibc heap arenas once initial GPU upload and glyph tessellation settle
         if self.frame_count == 3 || self.frame_count == 10 {
@@ -868,6 +898,7 @@ impl eframe::App for KreoApp {
 #[cfg(feature = "gui")]
 impl KreoApp {
     fn render_light_setting_view(&mut self, ui: &mut egui::Ui, container_w: f32) {
+        let elapsed = self.start_time.elapsed().as_secs_f32();
         let cfg = self.current_config();
 
         // 1. Header: logo + live device status
@@ -881,7 +912,14 @@ impl KreoApp {
         ui.add_space(12.0);
 
         // 2. KEYBOARD VISUALIZER (75% or 65%)
-        render_keyboard(ui, &mut self.keyboard, &cfg, container_w);
+        render_keyboard(
+            ui,
+            &mut self.keyboard,
+            &cfg,
+            elapsed,
+            &self.presses,
+            container_w,
+        );
 
         ui.add_space(14.0);
 
@@ -1598,6 +1636,8 @@ fn render_keyboard(
     ui: &mut egui::Ui,
     keyboard: &mut KeyboardModel,
     cfg: &LightingConfig,
+    elapsed: f32,
+    presses: &[(&'static str, Instant)],
     board_w: f32,
 ) {
     let pad = 18.0_f32;
@@ -1665,12 +1705,30 @@ fn render_keyboard(
             (p.y - board_rect.top() - pad + key_gap / 2.0) / unit,
         )
     };
+    let now = Instant::now();
+    let active_presses: Vec<preview::Press> = presses
+        .iter()
+        .filter_map(|(code, at)| {
+            let idx = keyboard.keys.iter().position(|k| k.code == *code)?;
+            let (x, y) = to_units(rects[idx].center());
+            let age = now.duration_since(*at).as_secs_f32();
+            Some(preview::Press {
+                x,
+                y,
+                age,
+                seed: (idx as f32 * 0.618_034).fract(),
+            })
+        })
+        .collect();
+
+    let t = preview::effect_time(elapsed, cfg.speed);
+    let rows = total_rows as f32;
     // Scale by brightness (0 = off .. 4 = max), like the firmware
     let b_factor = cfg.brightness.min(BRIGHTNESS_MAX) as f32 / BRIGHTNESS_MAX as f32;
 
     // Pass 2: paint
     let mut clicked_code: Option<&'static str> = None;
-    for (key_def, &key_rect) in keyboard.keys.iter().zip(&rects) {
+    for (idx, (key_def, &key_rect)) in keyboard.keys.iter().zip(&rects).enumerate() {
         if key_def.code == "Knob" {
             // Draw CNC Rotary Knob
             let knob_center = key_rect.center();
@@ -1695,13 +1753,14 @@ fn render_keyboard(
             continue;
         }
 
-        let per_key = keyboard.get_key_color(key_def.code, cfg.color);
-        let key_rgb = match cfg.mode {
-            LightingMode::Custom => per_key,
-            LightingMode::Off => Rgb::new(0, 0, 0),
-            _ if cfg.multicolor => animation::rainbow_hue(to_units(key_rect.center()).0 / 16.0),
-            _ => cfg.color,
+        let (x, y) = to_units(key_rect.center());
+        let key_pos = preview::KeyPos {
+            x,
+            y,
+            seed: (idx as f32 * 0.754_877).fract(),
         };
+        let per_key = keyboard.get_key_color(key_def.code, cfg.color);
+        let key_rgb = preview::key_color(cfg, key_pos, rows, t, &active_presses, per_key);
         let final_r = (key_rgb.r as f32 * b_factor).round() as u8;
         let final_g = (key_rgb.g as f32 * b_factor).round() as u8;
         let final_b = (key_rgb.b as f32 * b_factor).round() as u8;
@@ -1761,6 +1820,88 @@ fn render_keyboard(
     if let Some(code) = clicked_code {
         keyboard.toggle_selection(code);
     }
+}
+
+/// Maps an egui key to the visualizer's key code.
+#[cfg(feature = "gui")]
+fn egui_key_code(key: egui::Key) -> Option<&'static str> {
+    use egui::Key as K;
+    Some(match key {
+        K::Escape => "Esc",
+        K::F1 => "F1",
+        K::F2 => "F2",
+        K::F3 => "F3",
+        K::F4 => "F4",
+        K::F5 => "F5",
+        K::F6 => "F6",
+        K::F7 => "F7",
+        K::F8 => "F8",
+        K::F9 => "F9",
+        K::F10 => "F10",
+        K::F11 => "F11",
+        K::F12 => "F12",
+        K::Delete => "Del",
+        K::Backtick => "Grave",
+        K::Num1 => "1",
+        K::Num2 => "2",
+        K::Num3 => "3",
+        K::Num4 => "4",
+        K::Num5 => "5",
+        K::Num6 => "6",
+        K::Num7 => "7",
+        K::Num8 => "8",
+        K::Num9 => "9",
+        K::Num0 => "0",
+        K::Minus => "Minus",
+        K::Equals => "Equal",
+        K::Backspace => "Backspace",
+        K::Insert => "Ins",
+        K::Tab => "Tab",
+        K::Q => "Q",
+        K::W => "W",
+        K::E => "E",
+        K::R => "R",
+        K::T => "T",
+        K::Y => "Y",
+        K::U => "U",
+        K::I => "I",
+        K::O => "O",
+        K::P => "P",
+        K::OpenBracket => "LBracket",
+        K::CloseBracket => "RBracket",
+        K::Backslash => "Backslash",
+        K::End => "End",
+        K::A => "A",
+        K::S => "S",
+        K::D => "D",
+        K::F => "F",
+        K::G => "G",
+        K::H => "H",
+        K::J => "J",
+        K::K => "K",
+        K::L => "L",
+        K::Semicolon => "Semicolon",
+        K::Quote => "Quote",
+        K::Enter => "Enter",
+        K::PageUp => "PgUp",
+        K::Z => "Z",
+        K::X => "X",
+        K::C => "C",
+        K::V => "V",
+        K::B => "B",
+        K::N => "N",
+        K::M => "M",
+        K::Comma => "Comma",
+        K::Period => "Period",
+        K::Slash => "Slash",
+        K::ArrowUp => "Up",
+        K::PageDown => "PgDn",
+        K::Space => "Space",
+        K::ArrowLeft => "Left",
+        K::ArrowDown => "Down",
+        K::ArrowRight => "Right",
+        _ => return None,
+    })
 }
 
 #[cfg(feature = "gui")]
