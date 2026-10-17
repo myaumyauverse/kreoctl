@@ -829,6 +829,8 @@ impl eframe::App for KreoApp {
 #[cfg(feature = "gui")]
 impl KreoApp {
     fn render_light_setting_view(&mut self, ui: &mut egui::Ui, container_w: f32) {
+        let cfg = self.current_config();
+
         // 1. Header
         ui.horizontal(|ui| {
             render_kreo_logo(ui, self.keyboard.variant);
@@ -836,7 +838,12 @@ impl KreoApp {
 
         ui.add_space(12.0);
 
-        // 2. Control panel
+        // 2. KEYBOARD VISUALIZER (75% or 65%)
+        render_keyboard(ui, &self.keyboard, &cfg, container_w);
+
+        ui.add_space(14.0);
+
+        // 3. Control panel
         egui::Frame::new()
             .fill(KREO_PANEL_BG)
             .stroke(Stroke::new(1.0_f32, KREO_BORDER))
@@ -1393,6 +1400,156 @@ fn render_kreo_logo(ui: &mut egui::Ui, variant: KeyboardVariant) {
                 .size(10.5),
         );
     });
+}
+
+/// Renders the interactive mechanical keyboard with per-key RGB and rotary knob (75% or 65%).
+#[cfg(feature = "gui")]
+fn render_keyboard(
+    ui: &mut egui::Ui,
+    keyboard: &KeyboardModel,
+    cfg: &LightingConfig,
+    board_w: f32,
+) {
+    let pad = 18.0_f32;
+    let inner_w = board_w - pad * 2.0;
+    let key_gap = (inner_w * 0.0055).clamp(3.5, 6.0);
+    let u_size = (inner_w - 15.0 * key_gap) / 16.0;
+    let total_rows = keyboard.variant.total_rows();
+    let board_h = total_rows as f32 * u_size + (total_rows - 1) as f32 * key_gap + pad * 2.0;
+
+    let (board_rect, _) = ui.allocate_exact_size(Vec2::new(board_w, board_h), Sense::hover());
+
+    // Keyboard Outer Aluminum/Plastic Case Bezel
+    ui.painter().rect_filled(
+        board_rect,
+        CornerRadius::same(12),
+        Color32::from_rgb(22, 23, 30),
+    );
+    ui.painter().rect_stroke(
+        board_rect,
+        CornerRadius::same(12),
+        Stroke::new(1.5_f32, Color32::from_rgb(44, 46, 60)),
+        egui::StrokeKind::Inside,
+    );
+
+    // Pass 1: lay out every key
+    let mut row_offsets = [board_rect.left() + pad; 6];
+    let row_y_base = board_rect.top() + pad;
+    let knob_w = u_size * 1.25;
+    let rects: Vec<Rect> = keyboard
+        .keys
+        .iter()
+        .map(|key_def| {
+            let row = key_def.row;
+            let w = if key_def.code == "Knob" {
+                knob_w
+            } else {
+                key_def.width * u_size + (key_def.width - 1.0).max(0.0) * key_gap
+            };
+            let y = row_y_base + row as f32 * (u_size + key_gap);
+            let x = match (keyboard.variant, key_def.code) {
+                (_, "Knob") => board_rect.right() - pad - knob_w,
+                (KeyboardVariant::Hive75, "Del") => {
+                    board_rect.right() - pad - knob_w - key_gap - u_size
+                }
+                (KeyboardVariant::Hive65, "Del" | "PgUp" | "PgDn")
+                | (KeyboardVariant::Hive75, "Ins" | "End" | "PgUp" | "PgDn")
+                | (_, "Right") => board_rect.right() - pad - u_size,
+                (_, "Up" | "Down") => board_rect.right() - pad - u_size * 2.0 - key_gap,
+                (_, "Left") => board_rect.right() - pad - u_size * 3.0 - key_gap * 2.0,
+                _ => {
+                    let curr_x = row_offsets[row];
+                    row_offsets[row] += w + key_gap;
+                    curr_x
+                }
+            };
+            Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, u_size))
+        })
+        .collect();
+
+    // Key centres in key units, as the effect preview expects
+    let unit = u_size + key_gap;
+    let to_units = |p: Pos2| {
+        (
+            (p.x - board_rect.left() - pad + key_gap / 2.0) / unit,
+            (p.y - board_rect.top() - pad + key_gap / 2.0) / unit,
+        )
+    };
+    // Scale by brightness (0 = off .. 4 = max), like the firmware
+    let b_factor = cfg.brightness.min(BRIGHTNESS_MAX) as f32 / BRIGHTNESS_MAX as f32;
+
+    // Pass 2: paint
+    for (key_def, &key_rect) in keyboard.keys.iter().zip(&rects) {
+        if key_def.code == "Knob" {
+            // Draw CNC Rotary Knob
+            let knob_center = key_rect.center();
+            let radius_outer = (u_size * 0.44).clamp(14.0, 28.0);
+            let radius_inner = radius_outer * 0.8;
+
+            ui.painter()
+                .circle_filled(knob_center, radius_outer, Color32::from_rgb(52, 54, 68));
+            ui.painter().circle_stroke(
+                knob_center,
+                radius_outer,
+                Stroke::new(1.0_f32, Color32::from_rgb(70, 74, 94)),
+            );
+            ui.painter()
+                .circle_filled(knob_center, radius_inner, Color32::from_rgb(30, 32, 42));
+
+            let notch_pos = Pos2::new(
+                knob_center.x + radius_inner * 0.6,
+                knob_center.y - radius_inner * 0.4,
+            );
+            ui.painter().circle_filled(notch_pos, 2.2, Color32::WHITE);
+            continue;
+        }
+
+        let per_key = keyboard.get_key_color(key_def.code, cfg.color);
+        let key_rgb = match cfg.mode {
+            LightingMode::Custom => per_key,
+            LightingMode::Off => Rgb::new(0, 0, 0),
+            _ if cfg.multicolor => animation::rainbow_hue(to_units(key_rect.center()).0 / 16.0),
+            _ => cfg.color,
+        };
+        let final_r = (key_rgb.r as f32 * b_factor).round() as u8;
+        let final_g = (key_rgb.g as f32 * b_factor).round() as u8;
+        let final_b = (key_rgb.b as f32 * b_factor).round() as u8;
+
+        // Underglow light
+        let glow_alpha = (b_factor * 110.0).round() as u8;
+        ui.painter().rect_filled(
+            key_rect,
+            CornerRadius::same(5),
+            Color32::from_rgba_premultiplied(final_r / 2, final_g / 2, final_b / 2, glow_alpha),
+        );
+
+        // Keycap Body
+        let shrink_amt = (u_size * 0.04).clamp(1.5, 3.0);
+        let keycap_rect = key_rect.shrink(shrink_amt);
+        let keycap_bg = Color32::from_rgb(26, 28, 36);
+        ui.painter()
+            .rect_filled(keycap_rect, CornerRadius::same(4), keycap_bg);
+
+        // Keycap Edge
+        let stroke = Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 56));
+        ui.painter().rect_stroke(
+            keycap_rect,
+            CornerRadius::same(4),
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+
+        // Legend Text with RGB tint
+        let font_sz = (u_size * 0.28).clamp(9.5, 14.0);
+        let text_color = Color32::from_rgb(final_r.max(170), final_g.max(170), final_b.max(170));
+        ui.painter().text(
+            keycap_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            key_def.label,
+            egui::FontId::proportional(font_sz),
+            text_color,
+        );
+    }
 }
 
 #[cfg(feature = "gui")]
