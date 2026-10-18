@@ -6,7 +6,7 @@ use crate::{
     error::KreoError,
     keyboard::{KeyboardModel, KeyboardVariant},
     preview,
-    profile::ProfileStore,
+    profile::{KeyRemap, ProfileStore},
     protocol::{BRIGHTNESS_MAX, DirectionAxis, LightingConfig, LightingMode, SPEED_MAX, SPEED_MIN},
     sync::{Command, DeviceWorker, Event},
 };
@@ -142,6 +142,7 @@ const OFFICIAL_PRESETS: &[(&str, Rgb)] = &[
 #[derive(Debug, PartialEq, Eq)]
 enum SidebarTab {
     LightSetting,
+    ButtonSettings,
     OtherSettings,
 }
 
@@ -168,6 +169,13 @@ struct KreoApp {
     sidebar_open: bool,
     /// Recent physical key presses (while the window has focus), for reactive previews.
     presses: Vec<(&'static str, Instant)>,
+
+    // Button Settings state
+    selected_remap_key: Option<String>,
+    remap_tab: usize,
+    remap_target_key: String,
+    remap_media_action: String,
+    remap_macro_id: String,
 }
 
 #[cfg(feature = "gui")]
@@ -213,6 +221,11 @@ impl KreoApp {
             last_hw_change: None,
             sidebar_open: false,
             presses: Vec::new(),
+            selected_remap_key: None,
+            remap_tab: 0,
+            remap_target_key: "A".into(),
+            remap_media_action: "Play/Pause".into(),
+            remap_macro_id: "macro_1".into(),
         }
     }
 
@@ -692,6 +705,11 @@ impl eframe::App for KreoApp {
                                 "Effects & Per-Key RGB",
                             ),
                             (
+                                SidebarTab::ButtonSettings,
+                                "Button Settings",
+                                "Key Remaps & FN Layers",
+                            ),
+                            (
                                 SidebarTab::OtherSettings,
                                 "Other Settings",
                                 "Firmware & Diagnostics",
@@ -880,6 +898,14 @@ impl eframe::App for KreoApp {
                             ui.vertical_centered(|ui| {
                                 ui.set_max_width(container_w);
                                 self.render_light_setting_view(ui, container_w);
+                            });
+                        }
+                        SidebarTab::ButtonSettings => {
+                            let avail_w = ui.available_width();
+                            let container_w = (avail_w - 16.0).clamp(760.0, 1260.0);
+                            ui.vertical_centered(|ui| {
+                                ui.set_max_width(container_w);
+                                self.render_button_settings_view(ui, container_w);
                             });
                         }
                         SidebarTab::OtherSettings => {
@@ -1421,6 +1447,273 @@ impl KreoApp {
 
                 if ui.button("Restore Default Lighting").clicked() {
                     self.set_color(Rgb::new(0, 255, 136));
+                }
+            });
+    }
+
+    fn render_button_settings_view(&mut self, ui: &mut egui::Ui, container_w: f32) {
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+
+        // 1. Header
+        ui.vertical_centered(|ui| {
+            render_kreo_logo(ui, self.keyboard.variant);
+        });
+
+        ui.add_space(10.0);
+
+        ui.label(
+            egui::RichText::new("BUTTON SETTINGS & KEY REMAP")
+                .color(KREO_PURPLE_ACTIVE)
+                .size(13.0)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new("Select any key below to customize its hardware mapping, media shortcuts, or assign custom macros.")
+                .color(KREO_TEXT_MUTED)
+                .size(11.5),
+        );
+
+        ui.add_space(12.0);
+
+        // 2. Interactive visual keyboard
+        let cfg = self.current_config();
+        render_keyboard(
+            ui,
+            &mut self.keyboard,
+            &cfg,
+            elapsed,
+            &self.presses,
+            container_w,
+        );
+
+        ui.add_space(16.0);
+
+        // Check if any key was clicked in the visualizer
+        if !self.keyboard.selected_keys.is_empty() {
+            let last_selected = self.keyboard.selected_keys.last().cloned();
+            if self.selected_remap_key != last_selected {
+                self.selected_remap_key = last_selected;
+            }
+        }
+
+        // 3. Key Assignment Configuration Card
+        egui::Frame::new()
+            .fill(KREO_PANEL_BG)
+            .stroke(Stroke::new(1.0_f32, KREO_BORDER))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(20, 16))
+            .show(ui, |ui| {
+                ui.set_width(container_w);
+                if let Some(ref target_key) = self.selected_remap_key.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("SELECTED KEY: {target_key}"))
+                                .color(Color32::WHITE)
+                                .size(14.0)
+                                .strong(),
+                        );
+
+                        let current_remap = self
+                            .profile_store
+                            .active_profile()
+                            .key_remaps
+                            .get(target_key)
+                            .cloned()
+                            .unwrap_or(KeyRemap::Default);
+
+                        let status_tag = match &current_remap {
+                            KeyRemap::Default => "Default Action".to_string(),
+                            KeyRemap::Key(k) => format!("Remapped -> {k}"),
+                            KeyRemap::Media(m) => format!("Media -> {m}"),
+                            KeyRemap::Macro(id) => format!("Macro -> {id}"),
+                            KeyRemap::Disabled => "Disabled".to_string(),
+                        };
+
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new(format!("[ {status_tag} ]"))
+                                .color(KREO_PURPLE_ACTIVE)
+                                .size(12.5)
+                                .strong(),
+                        );
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Category Tabs
+                    let categories = [
+                        (0, "Default"),
+                        (1, "Keyboard Remap"),
+                        (2, "Multimedia"),
+                        (3, "Macro Assignment"),
+                        (4, "Disable Key"),
+                    ];
+
+                    ui.horizontal(|ui| {
+                        for (cat_id, label) in categories {
+                            let is_active = self.remap_tab == cat_id;
+                            let btn = ui.selectable_label(is_active, label);
+                            if btn.clicked() {
+                                self.remap_tab = cat_id;
+                            }
+                        }
+                    });
+
+                    ui.add_space(12.0);
+
+                    match self.remap_tab {
+                        0 => {
+                            ui.label(
+                                egui::RichText::new(
+                                    "This key will execute its standard hardware factory function.",
+                                )
+                                .color(KREO_TEXT_MUTED)
+                                .size(12.0),
+                            );
+                        }
+                        1 => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Target Key:")
+                                        .color(KREO_TEXT_MUTED)
+                                        .size(12.0),
+                                );
+                                let available_keys = [
+                                    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L",
+                                    "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X",
+                                    "Y", "Z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+                                    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
+                                    "F11", "F12", "Esc", "Tab", "CapsLock", "Space", "Backspace",
+                                    "Enter", "LShift", "RShift", "LCtrl", "RCtrl", "LAlt", "RAlt",
+                                    "Delete", "Insert", "Home", "End", "PageUp", "PageDown",
+                                    "Up", "Down", "Left", "Right",
+                                ];
+                                egui::ComboBox::from_id_salt("remap_key_combo")
+                                    .selected_text(&self.remap_target_key)
+                                    .show_ui(ui, |ui| {
+                                        for &k in &available_keys {
+                                            ui.selectable_value(
+                                                &mut self.remap_target_key,
+                                                k.to_string(),
+                                                k,
+                                            );
+                                        }
+                                    });
+                            });
+                        }
+                        2 => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Media Command:")
+                                        .color(KREO_TEXT_MUTED)
+                                        .size(12.0),
+                                );
+                                let media_actions = [
+                                    "Play/Pause",
+                                    "Mute",
+                                    "Volume Up",
+                                    "Volume Down",
+                                    "Next Track",
+                                    "Previous Track",
+                                    "Calculator",
+                                    "Web Browser",
+                                ];
+                                egui::ComboBox::from_id_salt("remap_media_combo")
+                                    .selected_text(&self.remap_media_action)
+                                    .show_ui(ui, |ui| {
+                                        for &m in &media_actions {
+                                            ui.selectable_value(
+                                                &mut self.remap_media_action,
+                                                m.to_string(),
+                                                m,
+                                            );
+                                        }
+                                    });
+                            });
+                        }
+                        3 => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Select Macro:")
+                                        .color(KREO_TEXT_MUTED)
+                                        .size(12.0),
+                                );
+                                let macros: Vec<String> = self
+                                    .profile_store
+                                    .active_profile()
+                                    .macros
+                                    .iter()
+                                    .map(|m| m.name.clone())
+                                    .collect();
+                                egui::ComboBox::from_id_salt("remap_macro_combo")
+                                    .selected_text(&self.remap_macro_id)
+                                    .show_ui(ui, |ui| {
+                                        for m_name in &macros {
+                                            ui.selectable_value(
+                                                &mut self.remap_macro_id,
+                                                m_name.clone(),
+                                                m_name,
+                                            );
+                                        }
+                                    });
+                            });
+                        }
+                        4 => {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Key will be disabled and will not emit any scancodes or actions.",
+                                )
+                                .color(Color32::from_rgb(240, 120, 120))
+                                .size(12.0),
+                            );
+                        }
+                        _ => {}
+                    }
+
+                    ui.add_space(14.0);
+
+                    ui.horizontal(|ui| {
+                        let apply_btn = egui::Button::new(
+                            egui::RichText::new("Apply Assignment")
+                                .color(Color32::WHITE)
+                                .size(12.0)
+                                .strong(),
+                        )
+                        .fill(KREO_PURPLE_ACTIVE)
+                        .corner_radius(CornerRadius::same(5))
+                        .min_size(Vec2::new(140.0, 28.0));
+
+                        if ui.add(apply_btn).clicked() {
+                            let new_remap = match self.remap_tab {
+                                1 => KeyRemap::Key(self.remap_target_key.clone()),
+                                2 => KeyRemap::Media(self.remap_media_action.clone()),
+                                3 => KeyRemap::Macro(self.remap_macro_id.clone()),
+                                4 => KeyRemap::Disabled,
+                                _ => KeyRemap::Default,
+                            };
+                            let prof = self.profile_store.active_profile_mut();
+                            if new_remap == KeyRemap::Default {
+                                prof.key_remaps.remove(target_key);
+                            } else {
+                                prof.key_remaps.insert(target_key.clone(), new_remap);
+                            }
+                            let _ = config::save_profile_store(&self.profile_store);
+                            self.status_msg = format!("Saved remap for {target_key}");
+                        }
+
+                        if ui.button("Reset to Default").clicked() {
+                            let prof = self.profile_store.active_profile_mut();
+                            prof.key_remaps.remove(target_key);
+                            let _ = config::save_profile_store(&self.profile_store);
+                            self.status_msg = format!("Reset {target_key} to default");
+                        }
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("No key selected. Click any key on the visual keyboard above to customize its assignment.")
+                            .color(KREO_TEXT_MUTED)
+                            .size(13.0),
+                    );
                 }
             });
     }
