@@ -6,7 +6,7 @@ use crate::{
     error::KreoError,
     keyboard::{KeyboardModel, KeyboardVariant},
     preview,
-    profile::{KeyRemap, ProfileStore},
+    profile::{KeyActionType, KeyRemap, MacroDefinition, MacroStep, MouseDirection, ProfileStore},
     protocol::{BRIGHTNESS_MAX, DirectionAxis, LightingConfig, LightingMode, SPEED_MAX, SPEED_MIN},
     sync::{Command, DeviceWorker, Event},
 };
@@ -143,6 +143,7 @@ const OFFICIAL_PRESETS: &[(&str, Rgb)] = &[
 enum SidebarTab {
     LightSetting,
     ButtonSettings,
+    MacroManagement,
     OtherSettings,
 }
 
@@ -176,6 +177,15 @@ struct KreoApp {
     remap_target_key: String,
     remap_media_action: String,
     remap_macro_id: String,
+
+    // Macro Management state
+    active_macro_idx: usize,
+    selected_step_idx: Option<usize>,
+    is_recording_macro: bool,
+    last_macro_event_instant: Option<Instant>,
+    fixed_delay_enabled: bool,
+    fixed_delay_ms: u32,
+    mouse_step_dist: [i32; 4],
 }
 
 #[cfg(feature = "gui")]
@@ -226,6 +236,13 @@ impl KreoApp {
             remap_target_key: "A".into(),
             remap_media_action: "Play/Pause".into(),
             remap_macro_id: "macro_1".into(),
+            active_macro_idx: 0,
+            selected_step_idx: None,
+            is_recording_macro: false,
+            last_macro_event_instant: None,
+            fixed_delay_enabled: false,
+            fixed_delay_ms: 16,
+            mouse_step_dist: [1, 1, 1, 1],
         }
     }
 
@@ -455,20 +472,22 @@ impl eframe::App for KreoApp {
         self.handle_device_events();
 
         // Record key presses so reactive effects (Reaction, Ripples, Traverse) can mirror them
-        ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                } = event
-                    && let Some(code) = egui_key_code(*key)
-                {
-                    self.presses.push((code, Instant::now()));
+        if !self.is_recording_macro {
+            ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } = event
+                        && let Some(code) = egui_key_code(*key)
+                    {
+                        self.presses.push((code, Instant::now()));
+                    }
                 }
-            }
-        });
+            });
+        }
         self.presses
             .retain(|(_, at)| at.elapsed().as_secs_f32() < preview::PRESS_LIFETIME);
 
@@ -476,6 +495,65 @@ impl eframe::App for KreoApp {
         let active_mode = self.profile_store.active_profile().mode;
         if self.active_tab == SidebarTab::LightSetting && preview::is_animated(active_mode) {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+
+        // Live Macro recording keystroke capture
+        if self.is_recording_macro && self.active_tab == SidebarTab::MacroManagement {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            let mut captured_events = Vec::new();
+            ctx.input(|i| {
+                for event in &i.raw.events {
+                    if let egui::Event::Key {
+                        key,
+                        pressed,
+                        repeat: false,
+                        ..
+                    } = event
+                    {
+                        captured_events.push((*key, *pressed));
+                    }
+                }
+            });
+
+            if !captured_events.is_empty() {
+                let now = Instant::now();
+                let delta = if let Some(last) = self.last_macro_event_instant {
+                    now.duration_since(last).as_millis().min(9999) as u32
+                } else {
+                    0
+                };
+                self.last_macro_event_instant = Some(now);
+
+                let delay = if self.fixed_delay_enabled {
+                    self.fixed_delay_ms
+                } else {
+                    delta
+                };
+
+                let prof = self.profile_store.active_profile_mut();
+                if self.active_macro_idx >= prof.macros.len() {
+                    prof.macros.push(MacroDefinition {
+                        id: format!("macro_{}", prof.macros.len() + 1),
+                        name: format!("macro_{}", prof.macros.len() + 1),
+                        steps: Vec::new(),
+                    });
+                }
+                for (key, pressed) in captured_events {
+                    let action = if pressed {
+                        KeyActionType::Press
+                    } else {
+                        KeyActionType::Release
+                    };
+                    prof.macros[self.active_macro_idx]
+                        .steps
+                        .push(MacroStep::Key {
+                            key: format!("{key:?}"),
+                            action,
+                            delay_ms: delay,
+                        });
+                }
+                let _ = config::save_profile_store(&self.profile_store);
+            }
         }
 
         // Release free glibc heap arenas once initial GPU upload and glyph tessellation settle
@@ -710,6 +788,11 @@ impl eframe::App for KreoApp {
                                 "Key Remaps & FN Layers",
                             ),
                             (
+                                SidebarTab::MacroManagement,
+                                "Macro Management",
+                                "Hardware Sequences",
+                            ),
+                            (
                                 SidebarTab::OtherSettings,
                                 "Other Settings",
                                 "Firmware & Diagnostics",
@@ -906,6 +989,14 @@ impl eframe::App for KreoApp {
                             ui.vertical_centered(|ui| {
                                 ui.set_max_width(container_w);
                                 self.render_button_settings_view(ui, container_w);
+                            });
+                        }
+                        SidebarTab::MacroManagement => {
+                            let avail_w = ui.available_width();
+                            let container_w = (avail_w - 16.0).clamp(760.0, 1260.0);
+                            ui.vertical_centered(|ui| {
+                                ui.set_max_width(container_w);
+                                self.render_macro_management_view(ui, container_w);
                             });
                         }
                         SidebarTab::OtherSettings => {
@@ -1716,6 +1807,374 @@ impl KreoApp {
                     );
                 }
             });
+    }
+
+    fn render_macro_management_view(&mut self, ui: &mut egui::Ui, _container_w: f32) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("MACRO MANAGEMENT")
+                    .color(KREO_PURPLE_ACTIVE)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new("• Record, edit, and assign hardware keystroke sequences")
+                    .color(KREO_TEXT_MUTED)
+                    .size(12.0),
+            );
+        });
+
+        ui.add_space(12.0);
+
+        // Ensure active macro exists
+        let prof = self.profile_store.active_profile_mut();
+        if prof.macros.is_empty() {
+            prof.macros.push(MacroDefinition {
+                id: "macro_1".into(),
+                name: "macro_1".into(),
+                steps: Vec::new(),
+            });
+        }
+        if self.active_macro_idx >= prof.macros.len() {
+            self.active_macro_idx = 0;
+        }
+
+        let curr_macro_name = prof.macros[self.active_macro_idx].name.clone();
+
+        ui.columns(2, |cols| {
+            // ==================== LEFT COLUMN: Macro Name, Mouse Action, Macro List ====================
+            let col1 = &mut cols[0];
+            col1.set_max_width(260.0);
+            col1.vertical(|ui| {
+                // 1. Macro Name Box
+                ui.label(
+                    egui::RichText::new("Macro Name:")
+                        .color(KREO_TEXT_MUTED)
+                        .size(11.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+
+                let (name_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+                ui.painter().rect_filled(name_rect, CornerRadius::same(4), KREO_PURPLE_ACTIVE);
+                ui.painter().text(
+                    name_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &curr_macro_name,
+                    egui::FontId::proportional(12.5),
+                    Color32::WHITE,
+                );
+
+                ui.add_space(14.0);
+
+                // 2. Insert the mouse action card
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(18, 19, 26))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 40, 52)))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("Insert the mouse action")
+                                .color(KREO_TEXT_WHITE)
+                                .size(11.5)
+                                .strong(),
+                        );
+                        ui.add_space(6.0);
+
+                        let directions = [
+                            ("Move to left", MouseDirection::Left, 0),
+                            ("Move to right", MouseDirection::Right, 1),
+                            ("Move to top", MouseDirection::Top, 2),
+                            ("Move to down", MouseDirection::Down, 3),
+                        ];
+
+                        for (label, dir, idx) in directions {
+                            ui.horizontal(|ui| {
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(label).color(Color32::WHITE).size(11.0),
+                                )
+                                .fill(Color32::from_rgb(26, 28, 38))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 48, 64)))
+                                .corner_radius(CornerRadius::same(4))
+                                .min_size(Vec2::new(120.0, 24.0));
+
+                                let dist = &mut self.mouse_step_dist[idx];
+                                if ui.add(btn).clicked() {
+                                    let delay = if self.fixed_delay_enabled {
+                                        self.fixed_delay_ms
+                                    } else {
+                                        16
+                                    };
+                                    let prof = self.profile_store.active_profile_mut();
+                                    prof.macros[self.active_macro_idx].steps.push(MacroStep::MouseMove {
+                                        direction: dir,
+                                        distance: *dist,
+                                        delay_ms: delay,
+                                    });
+                                    let _ = config::save_profile_store(&self.profile_store);
+                                }
+
+                                ui.add(egui::DragValue::new(dist).range(1..=1000));
+                            });
+                            ui.add_space(3.0);
+                        }
+                    });
+
+                ui.add_space(14.0);
+
+                // 3. Macro List
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(18, 19, 26))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 40, 52)))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("MACROS")
+                                .color(KREO_TEXT_MUTED)
+                                .size(10.5)
+                                .strong(),
+                        );
+                        ui.add_space(6.0);
+
+                        let macro_count = self.profile_store.active_profile().macros.len();
+                        for i in 0..macro_count {
+                            let m_name = self.profile_store.active_profile().macros[i].name.clone();
+                            let is_active = i == self.active_macro_idx;
+                            let btn = egui::Button::new(
+                                egui::RichText::new(&m_name)
+                                    .color(Color32::WHITE)
+                                    .size(11.5)
+                                    .strong(),
+                            )
+                            .fill(if is_active {
+                                KREO_PURPLE_ACTIVE
+                            } else {
+                                Color32::from_rgb(26, 28, 38)
+                            })
+                            .corner_radius(CornerRadius::same(4))
+                            .min_size(Vec2::new(ui.available_width(), 26.0));
+
+                            if ui.add(btn).clicked() {
+                                self.active_macro_idx = i;
+                                self.selected_step_idx = None;
+                            }
+                            ui.add_space(3.0);
+                        }
+
+                        ui.add_space(6.0);
+
+                        // Toolbar: + New, Delete
+                        ui.horizontal(|ui| {
+                            if ui.small_button("+ New").clicked() {
+                                let prof = self.profile_store.active_profile_mut();
+                                let next_id = prof.macros.len() + 1;
+                                prof.macros.push(MacroDefinition {
+                                    id: format!("macro_{next_id}"),
+                                    name: format!("macro_{next_id}"),
+                                    steps: Vec::new(),
+                                });
+                                self.active_macro_idx = prof.macros.len() - 1;
+                                let _ = config::save_profile_store(&self.profile_store);
+                            }
+
+                            if self.profile_store.active_profile().macros.len() > 1
+                                && ui.small_button("Delete").clicked()
+                            {
+                                let prof = self.profile_store.active_profile_mut();
+                                prof.macros.remove(self.active_macro_idx);
+                                if self.active_macro_idx >= prof.macros.len() {
+                                    self.active_macro_idx = prof.macros.len() - 1;
+                                }
+                                let _ = config::save_profile_store(&self.profile_store);
+                            }
+                        });
+                    });
+            });
+
+            // ==================== RIGHT COLUMN: Sequence Table, Recording, Delay ====================
+            let col2 = &mut cols[1];
+            col2.vertical(|ui| {
+                // Table Container
+                egui::Frame::new()
+                    .fill(KREO_PANEL_BG)
+                    .stroke(Stroke::new(1.0_f32, KREO_BORDER))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(Margin::same(0))
+                    .show(ui, |ui| {
+                        // Header Bar (Solid Purple matching official screenshot)
+                        let (hdr_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+                        ui.painter().rect_filled(hdr_rect, CornerRadius::same(4), KREO_PURPLE_ACTIVE);
+
+                        let col_x1 = hdr_rect.left() + 20.0;
+                        let col_x2 = hdr_rect.left() + (hdr_rect.width() * 0.45);
+                        let col_x3 = hdr_rect.left() + (hdr_rect.width() * 0.75);
+
+                        ui.painter().text(
+                            Pos2::new(col_x1, hdr_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "⌨ Keystroke",
+                            egui::FontId::proportional(12.0),
+                            Color32::WHITE,
+                        );
+                        ui.painter().text(
+                            Pos2::new(col_x2, hdr_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "Action",
+                            egui::FontId::proportional(12.0),
+                            Color32::WHITE,
+                        );
+                        ui.painter().text(
+                            Pos2::new(col_x3, hdr_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "Delay(ms)",
+                            egui::FontId::proportional(12.0),
+                            Color32::WHITE,
+                        );
+
+                        // Table Rows
+                        let mut deleted_idx = None;
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                let steps_len = self.profile_store.active_profile().macros[self.active_macro_idx].steps.len();
+                                if steps_len == 0 {
+                                    ui.add_space(20.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("No keystroke actions recorded.")
+                                                .color(KREO_TEXT_MUTED)
+                                                .size(12.0),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new("Click [● RECORD] below and type to record sequence.")
+                                                .color(KREO_PURPLE_ACTIVE)
+                                                .size(11.5),
+                                        );
+                                    });
+                                    ui.add_space(20.0);
+                                }
+
+                                let mut delay_changed = false;
+                                for row_i in 0..steps_len {
+                                    let step = &mut self.profile_store.active_profile_mut().macros[self.active_macro_idx].steps[row_i];
+                                    let bg_color = if row_i % 2 == 0 {
+                                        Color32::from_rgb(18, 19, 26)
+                                    } else {
+                                        Color32::from_rgb(22, 23, 32)
+                                    };
+
+                                    egui::Frame::new()
+                                        .fill(bg_color)
+                                        .inner_margin(Margin::symmetric(14, 6))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.set_width(ui.available_width());
+
+                                                // Column 1: Keystroke
+                                                let (key_label, is_key) = match step {
+                                                    MacroStep::Key { key, .. } => (format!("⌨  {key}"), true),
+                                                    MacroStep::MouseMove { direction, distance, .. } => {
+                                                        (format!("🖱  {direction:?} {distance}px"), false)
+                                                    }
+                                                };
+                                                ui.add_sized([140.0, 20.0], egui::Label::new(
+                                                    egui::RichText::new(key_label)
+                                                        .color(if is_key { Color32::WHITE } else { Color32::from_rgb(140, 200, 255) })
+                                                        .size(12.0)
+                                                        .strong(),
+                                                ));
+
+                                                // Column 2: Action indicator
+                                                let (act_label, act_color) = match step {
+                                                    MacroStep::Key { action: KeyActionType::Press, .. } => ("⤓ Press", Color32::from_rgb(52, 211, 153)),
+                                                    MacroStep::Key { action: KeyActionType::Release, .. } => ("⤒ Release", Color32::from_rgb(251, 191, 36)),
+                                                    MacroStep::MouseMove { .. } => ("Move", Color32::from_rgb(140, 160, 220)),
+                                                };
+                                                ui.add_sized([90.0, 20.0], egui::Label::new(
+                                                    egui::RichText::new(act_label)
+                                                        .color(act_color)
+                                                        .size(11.5)
+                                                        .strong(),
+                                                ));
+
+                                                // Column 3: Delay(ms)
+                                                let mut delay = step.delay_ms();
+                                                if ui.add(egui::DragValue::new(&mut delay).range(0..=10000)).changed() {
+                                                    step.set_delay_ms(delay);
+                                                    delay_changed = true;
+                                                }
+
+                                                // Delete row button
+                                                if ui.small_button("✖").clicked() {
+                                                    deleted_idx = Some(row_i);
+                                                }
+                                            });
+                                        });
+                                }
+
+                                if delay_changed {
+                                    let _ = config::save_profile_store(&self.profile_store);
+                                }
+                            });
+
+                        if let Some(idx) = deleted_idx {
+                            self.profile_store.active_profile_mut().macros[self.active_macro_idx].steps.remove(idx);
+                            let _ = config::save_profile_store(&self.profile_store);
+                        }
+                    });
+
+                ui.add_space(10.0);
+
+                // Bottom Recording Bar
+                ui.horizontal(|ui| {
+                    let rec_btn_text = if self.is_recording_macro {
+                        "⏹ STOP"
+                    } else {
+                        "● RECORD"
+                    };
+                    let rec_btn = egui::Button::new(
+                        egui::RichText::new(rec_btn_text)
+                            .color(Color32::WHITE)
+                            .size(12.0)
+                            .strong(),
+                    )
+                    .fill(if self.is_recording_macro {
+                        Color32::from_rgb(220, 38, 38)
+                    } else {
+                        KREO_PURPLE_ACTIVE
+                    })
+                    .corner_radius(CornerRadius::same(5))
+                    .min_size(Vec2::new(90.0, 28.0));
+
+                    if ui.add(rec_btn).clicked() {
+                        self.is_recording_macro = !self.is_recording_macro;
+                        if self.is_recording_macro {
+                            self.last_macro_event_instant = Some(Instant::now());
+                            self.status_msg = "Recording keystrokes... Press any keys".into();
+                        } else {
+                            self.status_msg = "Stopped recording".into();
+                            let _ = config::save_profile_store(&self.profile_store);
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.fixed_delay_enabled, "Fixed Time(ms)");
+                    if self.fixed_delay_enabled {
+                        ui.add(egui::DragValue::new(&mut self.fixed_delay_ms).range(1..=5000));
+                        ui.label(egui::RichText::new("ms").color(KREO_TEXT_MUTED).size(11.0));
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Clear Steps").clicked() {
+                            self.profile_store.active_profile_mut().macros[self.active_macro_idx].steps.clear();
+                            let _ = config::save_profile_store(&self.profile_store);
+                        }
+                    });
+                });
+            });
+        });
     }
 }
 
