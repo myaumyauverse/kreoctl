@@ -8,7 +8,7 @@ repository = "https://github.com/myaumyauverse/kreoctl"
 readme = "README.md"
 
 [features]
-default = []
+default = ["gui"]
 gui = ["dep:eframe"]
 
 [dependencies]
